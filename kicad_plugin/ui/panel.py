@@ -134,9 +134,6 @@ if _WX_AVAILABLE:
             # Keep the conversation pinned to the newest output while one AI
             # turn is actively streaming / appending tool results.
             self._follow_output_to_bottom: bool = False
-            # Monotonic counter for tool call sequence IDs (used by shell.js for
-            # unique details element IDs).
-            self._tool_seq: int = 0
             # True while SetPage(shell) is in-flight.  Only relevant during
             # initial shell load — subsequent updates use RunScript, not SetPage.
             self._page_loading: bool = False
@@ -1541,7 +1538,6 @@ if _WX_AVAILABLE:
                 st = apply_stream_event(
                     pending=self._pending_ai_text,
                     entries=self._conv_entries,
-                    tool_seq=self._tool_seq,
                     tool_calls_made=self._tool_calls_made,
                     turn_had_text=self._turn_had_text,
                     delta_chars=self._stream_delta_chars,
@@ -1550,7 +1546,6 @@ if _WX_AVAILABLE:
                     timestamp=lambda: datetime.datetime.now().strftime("%H:%M:%S"),
                 )
                 self._pending_ai_text = st.pending
-                self._tool_seq = st.tool_seq
                 self._tool_calls_made = st.tool_calls_made
                 self._turn_had_text = st.turn_had_text
                 self._stream_delta_chars = st.delta_chars
