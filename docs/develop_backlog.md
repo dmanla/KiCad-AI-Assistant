@@ -35,18 +35,34 @@ Multiple `(drill oval w l)` nodes exist in the file history. The router
 would generate no obstacle for any of them. (The current
 `ninja-keyboard.kicad_pcb` uses 309 circular NPTH drills only.)
 
-### Unresolved question
+### Semantics (resolved 2026-09-07, primary source KiCad master `pcbnew/pad.cpp`)
 
-KiCad's oval-drill semantics for `(drill oval w l)` is not confirmed from
-primary source at write time:
-- Is `l` the total slot length (outer ends) or the center-to-center
-  distance of the two end circles?
-- Does the slot's major axis follow the pad's own `at` rotation, the
-  footprint rotation, or neither (fixed along one axis)?
+- **`l` is the total outer slot length** (including both end caps), not the
+  center-to-center distance. `PAD::GetEffectiveDrillShape` builds the hole as
+  `SHAPE_SEGMENT` with half-width `min(w, l)/2` and endpoint offset
+  `(|w−l|/2, |w−l|/2)` on the longer drill axis, i.e. endpoints at
+  `±(l−w)/2`: outer extent = `l`, center-to-center = `l − w`.
+- **The slot's major axis follows the longer drill dimension** in the pad's
+  local frame (X when `w > l`, Y when `l > w`; `w == l` degenerates to a
+  circle of radius `w/2`).
+- **Rotation:** the endpoint offset is rotated by the pad's effective
+  orientation (`GetOrientation()`, master: `m_libOrientation +
+  parentFootprint->GetOrientation()`).  Convention confirmed on the repo
+  side: `pcb_footprint_utils.py` documents that KiCad 10 files store pad
+  rotation as **absolute board-space degrees**, matching
+  `PAD::SetOrientation`/`GetOrientation` (which convert between the
+  relative lib frame and board space by adding/subtracting the footprint
+  orientation).  Sanity note: a slot with pad angle 0 inside a rotated
+  footprint renders *with* the footprint rotation in KiCad; pin this down
+  with one real file where both footprint and pad carry nonzero rotation
+  before finalizing the implementation.
 
-The pad examples show mixed data (`(size 3 2.5)` with `(drill oval 2.5 2)`;
-`(size 1 1.6)` with `(drill oval 0.6 1.2)`) — size and drill axes do not
-obviously align, so the axis rule needs verification before implementing.
+  Caveat on the current router: `_pad_obstacle` deliberately rotates by
+  `fp_rot` **only** and ignores the pad's own `at` rotation
+  (`world_model.py:404-407`), while `pcb_query_tools.list_footprints`
+  treats `pad_rot` as absolute (`:319`). Any oval-slot implementation must
+  first unify this rotation pipeline — a rotated pad's copper obstacle
+  itself is currently drawn at the wrong angle.
 
 ### Fix (proposed)
 
@@ -154,21 +170,32 @@ rotation plus the footprint rotation (verify which KiCad actually applies).
 
 ## Batch support for set_*/list_* tools
 
-**Status:** open (proposed)
+**Status:** implemented (2026-09-07) — set/get tools batched;
+`list_footprints` gains only a `ref_prefix` row filter
+(`set_symbol_property`, `set_footprint_position`, `set_footprint_property`),
+partial-apply per-ref results; get reads (`get_footprint`,
+`get_footprint_bbox`, `list_symbol_properties`) take
+`references: list[str]`.  `list_nets`/`list_vias`/`list_tracks` unchanged
+(bbox/fields projections dropped 2026-09-07 as too complex for the
+payoff). `set_net_class_rules` stays single-class; `set_design_rules` /
+`set_board_outline_rect` non-per-object, out of scope.
 
 ### Current state
 
 - The set tools operate on one object per call:
   `set_symbol_property` (`symbol_edit_tools.py`), `set_footprint_position`
   (`pcb_placement_tools.py`), `set_footprint_property`
-  (`pcb_edit_tools.py`), `set_design_rules`/`set_net_class_rules`
-  (`drc_tools.py`), `set_board_outline_rect` — each takes a single target
-  reference/path.
-- The list tools return whole tables with no filtering: `list_footprints`,
-  `list_nets`, `list_tracks`, `list_vias`, `list_symbol_properties`,
-  `list_symbol_libraries` (the only one with `limit`/`offset`) — an LLM
-  asking for "all nets of one net class" or "footprints near X" must
-  fetch and filter the full JSON.
+  (`pcb_edit_tools.py`), `set_net_class_rules` (`drc_tools.py`) — each
+  takes a single target reference/class.  (`set_design_rules` takes a
+  project-level dict, `set_board_outline_rect` a single rectangle — both
+  non-per-object, out of scope.)
+- The list tools have limited filtering: `list_footprints`, `list_nets`
+  (only `classify`) return whole tables; `list_tracks`/`list_vias`
+  (`net`, tracks also `layer`) and `list_symbol_libraries`
+  (`limit`/`offset`) are partial — "all nets of one net class" or
+  "footprints near X" still requires fetching the full JSON.  Batch
+  precedent already exists: `assign_nets_to_class`, `align_footprints`
+  take `references: list[str]`.
 
 ### Impact
 
@@ -177,19 +204,36 @@ footprints to a row) need N tool calls; large boards make list responses
 huge, inflating token use in long sessions (same pressure as the
 tool-collapse issue above).
 
-### Fix (proposed)
+### Fix (design agreed 2026-09-07 — batch-first, no backward-compat
+retained per maintainer decision)
 
-1. Batch set: accept multiple targets (lists of references) in the set
-   tools, returning per-target results; one parse+save per call, single
-   `.bak`.
-2. Batch/query list: add optional `filter` (net/ref prefix, bbox,
-   property) and `fields` (subset projection) parameters to the big
-   list tools; keep backwards-compatible defaults.
+1. Set tools switch to `items: list[dict]`: each self-contained entry
+   `{"reference", ...spec}` replaces the single `reference` + shared
+   property/value params on `set_symbol_property` (`property_name` +
+   `property_value`), `set_footprint_position` (`x`/`y`/`rotation`, each
+   optional but at least one required per entry), `set_footprint_property`
+   (`property_name` + `value`).  Targets may carry different values in one
+   call.  One parse + one save per call, single `.bak`.  Per-target results
+   in `results[]`; partial-apply semantics (successful targets saved,
+   failures keep their per-ref error — per `docs/plugin/mutation_safety.md`).
+   Duplicate references or unknown item fields are rejected.
+   `set_net_class_rules` stays single-class.
+2. List tools stay lean (decided 2026-09-07 — filters/fields projection
+   judged too complex for the payoff): only `list_footprints` gains an
+   optional `ref_prefix` row filter (default `None` = all footprints).
+   `list_nets` (`classify`) and `list_vias` (`net`) are unchanged.
+3. Per-object read tools batch too: `references: list[str]` replaces the
+   single `reference` on `get_footprint`, `get_footprint_bbox`
+   (`pcb_query_tools.py`) and `list_symbol_properties`
+   (`symbol_edit_tools.py`).  One file load, per-reference `results[]`
+   entries; missing references keep per-ref errors; duplicates/empty
+   entries/unknown designators rejected up front.
 
 ### Validation
 
-- Unit: batch `set_symbol_property` over 10 refs → one save, all applied;
-  `list_footprints` with bbox filter returns only the points inside.
+- Unit: batch `set_symbol_property` over refs incl. one missing → one
+  save, successes applied, per-ref errors reported; duplicate refs
+  rejected; `list_footprints` `ref_prefix` row filter.
 - Manual: script a 20-object edit against a board, compare tool calls
   and response size vs. today.
 
