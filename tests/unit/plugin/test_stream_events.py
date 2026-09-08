@@ -11,7 +11,6 @@ def _state(**overrides):
     state = {
         "pending": "",
         "entries": [],
-        "tool_seq": 0,
         "tool_calls_made": False,
         "turn_had_text": False,
         "delta_chars": 0,
@@ -26,7 +25,6 @@ def _apply(state, evt):
     st = apply_stream_event(
         pending=state["pending"],
         entries=state["entries"],
-        tool_seq=state["tool_seq"],
         tool_calls_made=state["tool_calls_made"],
         turn_had_text=state["turn_had_text"],
         delta_chars=state["delta_chars"],
@@ -36,7 +34,6 @@ def _apply(state, evt):
     )
     state.update(
         pending=st.pending,
-        tool_seq=st.tool_seq,
         tool_calls_made=st.tool_calls_made,
         turn_had_text=st.turn_had_text,
         delta_chars=st.delta_chars,
@@ -157,7 +154,7 @@ def test_turn_end_defensive_finalise_of_leftover_draft():
     assert s["entries"] == [{"type": "ai", "text": "before", "timestamp": "00:00:00"}]
 
 
-def test_tool_call_entries_carry_seq_and_mark_tool_use():
+def test_tool_call_entries_mark_tool_use():
     s = _state()
     _apply(
         s,
@@ -179,10 +176,49 @@ def test_tool_call_entries_carry_seq_and_mark_tool_use():
     )
 
     assert s["tool_calls_made"] is True
-    assert [e["_seq"] for e in s["entries"]] == [1, 2]
     assert [e["name"] for e in s["entries"]] == ["edit_track", "reload_kicad"]
 
 
 def test_make_ai_entry_shape():
     entry = make_ai_entry("answer text", "12:34:56")
     assert entry == {"type": "ai", "text": "answer text", "timestamp": "12:34:56"}
+
+
+def test_status_event_appends_status_entry():
+    """A status event (e.g. compacted-history notice) becomes a chat entry
+    with the rendering format used elsewhere (type/status + color_hex)."""
+    s = _state()
+    st = _apply(
+        s,
+        {
+            "type": "status",
+            "text": "⟲ History compacted — earlier context summarised.",
+            "color_hex": "#B8860B",
+        },
+    )
+    assert st.entries_changed is True
+    assert s["entries"] == [
+        {
+            "type": "status",
+            "text": "⟲ History compacted — earlier context summarised.",
+            "color_hex": "#B8860B",
+        }
+    ]
+    # Status notices never touch the draft / turn text state.
+    assert s["pending"] == ""
+    assert st.turn_had_text is False
+    assert st.draft_changed is False
+
+
+def test_status_event_defaults_color_when_omitted():
+    """Rendering falls back to the neutral colour when no color_hex is given."""
+    s = _state()
+    _apply(s, {"type": "status", "text": "notice"})
+    assert s["entries"] == [{"type": "status", "text": "notice", "color_hex": "#1E1E1E"}]
+
+
+def test_status_event_is_not_a_tool_call():
+    """Status events must not mark tool use."""
+    s = _state()
+    _apply(s, {"type": "status", "text": "notice"})
+    assert s["tool_calls_made"] is False
