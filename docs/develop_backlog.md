@@ -81,50 +81,6 @@ rotation plus the footprint rotation (verify which KiCad actually applies).
 
 ---
 
-## Unify schematic/PCB version management and archive history
-
-**Status:** open (proposed)
-
-### Current state
-
-- `kcaa/tools/version_tools.py` snapshots a single file into the
-  project's `.versions/` directory (`save_file_version` /
-  `list_file_versions` / `restore_file_version`) — callers must invoke it
-  per file, and the two file kinds are managed independently.
-- Every edit tool (`symbol_edit_tools.py`, `wire_edit_tools.py`, …)
-  writes a `.kicad_sch.bak` before saving — one-shot, single-path.
-- KiCad itself maintains a per-file `.history/` folder; three separate
-  mechanisms coexist with no shared retention policy.
-
-### Aim
-
-- One versioning scheme covering both `.kicad_sch` and `.kicad_pcb` (and,
-  optionally, the whole project tree), so a restore can roll the project
-  back as a unit.
-- Compact storage: pack history files into one archive (`.tar.gz`/`.zip`)
-  per project instead of loose timestamped copies, with a retention
-  policy (keep-all, keep-last-N, daily/weekly) chosen by the user.
-
-### Fix (proposed)
-
-1. Extend `version_tools.py` with `save_project_version` /
-   `list_project_versions` / `restore_project_version` that snapshot the
-   schematic+PCB set (or whole project) as one archive entry.
-2. Route the per-edit `.bak` writes through the same archive writer, or
-   document explicitly that `.bak` stays a short-lived single-change
-   safety net while `.versions/` is the durable archive.
-3. Define how archived history interplays with KiCad's own `.history/`
-   (which KiCad auto-prunes) to avoid duplication.
-
-### Validation
-
-- Unit: `tests/unit/tools/test_version_tools.py` extended — project
-  archive contains consistent sch+pcb pairs; restore returns all files;
-  retention policy evicts correctly.
-- Manual: edit schematic + PCB, save versions, restore an older pair.
-
----
-
 ## Project-level symbol table with 3rdparty symbol export
 
 **Status:** open (proposed)
@@ -239,7 +195,124 @@ retained per maintainer decision)
 
 ---
 
+## LLM vision-guided routing loop
+
+**Status:** open (proposed)
+
+### Current state
+
+- Routing is one-shot/batch: the plugin auto-route exports the board to
+  DSN, runs FreeRouting headless and reimports the SES
+  (`kicad_plugin/autorouter.py`, `start_freerouting_thread`); the kcaa
+  router routes one net at a time over a world model (obstacles →
+  visibility graph → A*), but nothing inspects the routed result or
+  steers the router mid-flight. A congested corridor, a via farm or a
+  detour net is only caught afterwards by DRC (`run_drc_via_ipc`).
+- `generate_pcb_thumbnail(project_path)` (`kcaa/tools/export_tools.py`)
+  already renders the board to a PNG via kicad-cli, and `llm_client.py`
+  already carries multimodal turns (`_build_user_content` emits
+  OpenAI-style `image_url` blocks; converted for Anthropic/Ollama) — but
+  nothing feeds a tool-rendered raster back to the model.
+
+### Aim
+
+- Close the loop with LLM vision: render the board state → the LLM
+  inspects it (unrouted ratlines, congestion, DRC markers, crossing or
+  cramped traces, via density) → returns a short corrective routing plan
+  (nets/regions to rework and in what order) → the router/FreeRouting
+  applies it → re-render; repeat until the LLM judges the board clean.
+
+### Fix (proposed)
+
+1. **Raster into the loop**: let the review step call
+   `generate_pcb_thumbnail` (plus optional zoomed crop on a region from
+   the track bbox) and surface the returned PNG as an `images` entry on
+   the next turn, reusing the existing multimodal plumbing instead of
+   adding a parallel image path.
+2. **Vision review**: a schema-constrained prompt over the raster
+   returning e.g. `{ok: bool, rework: [{net, area, reason}],
+   congestion: [area]}`; parse strictly, reject free-form
+3. **Steering mapping**: map `rework` back to executable routing — net
+   order + tear-down-and-reroute list for `kcaa.router.router`
+   (per-net `build_world_model` calls already exist), or reorder /
+   `ignore_nets`-constrained FreeRouting passes (`autorouter.py` already
+   supports per-run net ignores).
+4. **Termination without silent fallback**: stop when the review returns
+   `ok` or an explicit iteration budget is exhausted; on budget
+   exhaustion report the last review (remaining issues) to the user
+   instead of looping forever or inventing a degraded path.
+
+### Open questions
+
+- Which configured backends are actually vision-capable, and does the
+  MCP tool-result → `images` wiring exist anywhere yet (thumbnail PNG
+  today returns a path/text, not a base64 content block)?
+- Visual review is a *hint*, not geometry truth — final acceptance must
+  stay with `run_drc_via_ipc`; the summary is a heuristic gate, not a
+  validation path.
+
+### Validation
+
+- Unit: review-output schema parsing and the review → net-order/reroute
+  steering mapping over a fixture board with a known congested corridor.
+- Integration: small 2-layer board with a deliberately congested corner;
+  run the loop on the MCP server and assert it converges (`ok`) or
+  reports unresolved nets within the iteration budget.
+
+---
+
 ## Resolved
+
+### Unify schematic/PCB version management and archive history
+
+**Status:** resolved (2026-09-08) — PR #121 (commits `20c088a`, `0bcb0fe`,
+`0e0e22f`); closes issue #120.
+
+Schematic, PCB and `.kicad_pro` now share one version id and restore
+together as a consistent unit.  The `keep-all / daily-weekly` retention
+spectrum was trimmed to a parametrized keep-last-N (default 10), the same
+default the removed per-file tools used.
+
+#### Implementation
+
+1. `kcaa/utils/version_manager.py` — `save_project_version` /
+   `list_project_versions` / `restore_project_version` pack the same-stem
+   `.kicad_sch` + `.kicad_pcb` + `.kicad_pro` into one `.tar.gz` under
+   `<project_dir>/.versions/project/` (`<stem>.project.<ts>.tar.gz`) with a
+   `.manifest.json` (per-file SHA-256) for dedup; restore archives the
+   current state first (undoable) and extracts over the project files.
+   Only files that currently exist are archived.
+2. `kcaa/tools/version_tools.py` — three MCP tools wrapping the manager,
+   registered in both profiles through the existing
+   `register_version_tools`.
+3. `.bak` stays the short-lived single-change safety net; KiCad's
+   auto-pruned `.history/` stays independent.  `.gitignore` now excludes
+   `**/.versions/`.
+4. **Legacy removal + framework migration (same PR, final form):** the
+   per-file tools (`save_file_version` / `list_file_versions` /
+   `restore_file_version`) and their manager functions
+   (`save_version_snapshot` / `list_versions` / `restore_version`) are
+   removed — the three project tools are the only versioning surface.
+   The plugin framework's auto-snapshot now calls `save_project_version`
+   (derived pro path, deduped per project per turn), rollback-history
+   pruning keys on `project_file` + `version_id` and prunes any turn that
+   touched any file of the restored project, the auto-route pre-routing
+   backup uses the project archive, and the tool-policy registry was
+   updated accordingly.
+5. Old `.versions/<basename>.<ts>` snapshots written by the removed tools
+   are no longer readable by any tool; the files are left on disk.
+
+#### Validation
+
+- Unit `tests/unit/tools/test_project_version_tools.py` (14): archive
+  bundles all three files, dedup reuse, distinct id on change, pro-only
+  project, keep-pruning, missing-file/OSError paths, restore round-trip
+  and undo via backup id.
+- Integration `tests/integration/test_version_tools.py` (6 new): save /
+  list / restore over the real MCP server.
+- The legacy unit test file (`tests/unit/tools/test_version_tools.py`) was
+  removed with the tools it tested; `test_llm_client.py` auto-snapshot and
+  rollback-pruning tests were migrated to the project scheme.
 
 ### Tool-output collapse stops working in long sessions
 
