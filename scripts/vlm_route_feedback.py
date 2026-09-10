@@ -76,18 +76,17 @@ DEFAULT_PCB = os.path.join(
 DEFAULT_VIA_PAIRS: tuple[tuple[str, str], ...] = (("F.Cu", "B.Cu"), ("B.Cu", "In1.Cu"))
 
 _SYSTEM_PROMPT = """You are a PCB routing planner. The image shows the world
-model of a printed circuit board as several panels: one per copper layer
-(F.Cu, B.Cu, In1.Cu, ...) plus an "overview" panel stacking all layers.
+model of a printed circuit board as several panels, one per copper layer
+(F.Cu, B.Cu, In1.Cu, ...). The render follows the KiCad default colour
+theme (dark background).
 
 Image encoding:
-- Line style encodes the copper layer: solid = F.Cu (top), dashed = B.Cu
-  (bottom), dotted = inner layers.
-- Colour encodes the net; the overview panel lists which colour maps to
-  which net.
+- Traces, pads and via rings are coloured by copper layer: F.Cu = red,
+  B.Cu = blue, inner layers = green/amber/purple (legend in the header).
 - Copper pads are rectangles labelled ref.pad (e.g. "R1.1").
-- Dashed red lines connect pad pairs that still need routing.
-- Grey hatched polygons are keepout zones; white-centred rings are vias;
-  grey outlines are component bodies.
+- Dashed white lines connect pad pairs that still need routing.
+- Grey hatched polygons are keepout zones; vias are dark rings with a
+  layer-coloured edge; light grey outlines are component bodies.
 
 Your job: decide what to route next. Reply with exactly three lines:
 
@@ -103,7 +102,22 @@ Rules:
   asked list.
 - Do not invent pad numbers that were not shown."""  # noqa: E501
 
-_NET_COLORS = ["#1f77b4", "#2ca02c", "#d62728", "#9467bd", "#ff7f0e", "#8c564b"]
+# KiCad default theme approximations: copper layer colours, dark canvas.
+_KICAD_LAYER_COLORS = {
+    "F.Cu": "#E31A1C",
+    "B.Cu": "#1E5BC6",
+    "In1.Cu": "#2E9E44",
+    "In2.Cu": "#E6A71D",
+    "In3.Cu": "#9B59B6",
+    "In4.Cu": "#0FA3B1",
+    "Edge.Cuts": "#F2DA57",
+}
+_BG_COLOR = "#17181D"
+_BODY_COLOR = "#C9C9C9"
+_ZONE_FACE = "#26262B"
+_ZONE_EDGE = "#707070"
+_VIA_FACE = "#1F1F23"
+_PENDING_COLOR = "#F0F0F0"
 
 
 def _sym(value: Any) -> str:
@@ -115,15 +129,8 @@ def _sym(value: Any) -> str:
     return str(value)
 
 
-def _net_color(net: str) -> str:
-    idx = abs(hash(net)) % len(_NET_COLORS)
-    return _NET_COLORS[idx]
-
-
-def _net_color_map(nets: list[str]) -> dict[str, str]:
-    """Deterministic, repeatable colour per net (no hash collisions)."""
-    ordered = sorted({n for n in nets if n})
-    return {n: _NET_COLORS[i % len(_NET_COLORS)] for i, n in enumerate(ordered)}
+def _layer_color(layer: str) -> str:
+    return _KICAD_LAYER_COLORS.get(layer, "#9A9A9A")
 
 
 @dataclass
@@ -456,10 +463,8 @@ def _pad_center(data: list, ref: str, pad_num: str) -> tuple[float, float] | Non
     return None
 
 
-def _draw_pad(
-    ax, geo: Any, net: str, alpha: float = 1.0, colors: dict[str, str] | None = None
-) -> None:
-    color = (colors or {}).get(net) or _net_color(net)
+def _draw_pad(ax, geo: Any, layer: str, alpha: float = 1.0) -> None:
+    color = _layer_color(layer)
     x, y = geo.bounds[0], geo.bounds[1]
     w = geo.bounds[2] - geo.bounds[0]
     h = geo.bounds[3] - geo.bounds[1]
@@ -477,55 +482,45 @@ def _draw_pad(
     )
 
 
-_LAYER_STYLES = {"F.Cu": "-", "B.Cu": "--", "In1.Cu": ":"}
 _COPPER_ORDER = ("F.Cu", "In1.Cu", "In2.Cu", "In3.Cu", "In4.Cu", "B.Cu")
 
 
-def _draw_segment(ax, node: list, panel: str | None, colors: dict[str, str] | None = None) -> None:
-    """Draw a track/line node; only copper segments on *panel* are drawn.
-
-    ``panel`` is the copper layer being drawn, or None for the overview.
-    """
+def _draw_segment(ax, node: list, panel: str) -> None:
+    """Draw a track/line node; only copper segments on *panel* are drawn."""
     start = _node_coord(node, "start")
     end = _node_coord(node, "end")
     if start is None or end is None:
         return
-    if "Edge.Cuts" in [str(s) for s in node] or "CrtYd" in [str(s) for s in node]:
+    layers = [str(s) for s in node]
+    if "Edge.Cuts" in layers or "CrtYd" in layers:
+        edge = "#F2DA57" if "Edge.Cuts" in layers else "#5A5A5A"
         ax.plot(
             [start[0], end[0]],
             [start[1], end[1]],
-            "k-",
+            color=edge,
             linewidth=0.6,
-            alpha=0.4,
+            alpha=0.9,
             zorder=1,
         )
         return
     layer = None
-    net = None
     for sub in node:
-        if not isinstance(sub, list) or len(sub) < 2:
-            continue
-        if _sym(sub[0]) == "layer":
+        if isinstance(sub, list) and len(sub) >= 2 and _sym(sub[0]) == "layer":
             layer = str(sub[1])
-        elif _sym(sub[0]) == "net" and len(sub) > 2:
-            net = str(sub[2])
-    if panel is not None and layer != panel:
+            break
+    if layer != panel:
         return
-    color = (colors or {}).get(net or "") or "#555555"
-    linestyle = _LAYER_STYLES.get(layer or "", "-")
     ax.plot(
         [start[0], end[0]],
         [start[1], end[1]],
-        color=color,
-        linestyle=linestyle,
+        color=_layer_color(layer),
         linewidth=1.4,
-        alpha=0.85 if panel is None else 1.0,
         zorder=3,
     )
 
 
-def _draw_via(ax, node: list) -> None:
-    """Draw a via as a white-centred ring (it spans the whole stack)."""
+def _draw_via(ax, node: list, panel: str) -> None:
+    """Draw a via as a dark ring with a layer-coloured edge (spans the stack)."""
     at = _node_coord(node, "at")
     if at is None:
         return
@@ -540,9 +535,9 @@ def _draw_via(ax, node: list) -> None:
         mpatches.Circle(
             at,
             diameter / 2,
-            facecolor="white",
-            edgecolor="black",
-            linewidth=1.0,
+            facecolor=_VIA_FACE,
+            edgecolor=_layer_color(panel),
+            linewidth=1.2,
             zorder=4,
         )
     )
@@ -576,7 +571,7 @@ def _draw_footprint_body(ax, fp: list) -> None:
                 ax.plot(
                     [p1[0], p2[0]],
                     [p1[1], p2[1]],
-                    color="#9e9e9e",
+                    color=_BODY_COLOR,
                     linewidth=0.6,
                     zorder=1,
                 )
@@ -586,7 +581,7 @@ def _draw_footprint_body(ax, fp: list) -> None:
                 x0, y0, x1, y1 = start[0], start[1], end[0], end[1]
                 pts = [wpt(x, y) for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0))]
                 xs, ys = zip(*pts)
-                ax.plot(xs, ys, color="#9e9e9e", linewidth=0.6, zorder=1)
+                ax.plot(xs, ys, color=_BODY_COLOR, linewidth=0.6, zorder=1)
         elif kind == "fp_circle":
             center = _node_coord(sub, "center")
             if center is None:
@@ -606,7 +601,7 @@ def _draw_footprint_body(ax, fp: list) -> None:
                         wpt(*center),
                         radius,
                         fill=False,
-                        edgecolor="#9e9e9e",
+                        edgecolor=_BODY_COLOR,
                         linewidth=0.6,
                         zorder=1,
                     )
@@ -631,7 +626,16 @@ def _zone_points(zone: list) -> list[tuple[float, float]]:
     return pts
 
 
-def _draw_zone(ax, zone: list) -> None:
+def _zone_layer(zone: list) -> str | None:
+    for sub in zone:
+        if isinstance(sub, list) and len(sub) >= 2 and _sym(sub[0]) == "layer":
+            return str(sub[1])
+    return None
+
+
+def _draw_zone(ax, zone: list, panel: str) -> None:
+    if _zone_layer(zone) != panel:
+        return
     pts = _zone_points(zone)
     if len(pts) >= 3:
         xs = [p[0] for p in pts]
@@ -639,9 +643,9 @@ def _draw_zone(ax, zone: list) -> None:
         ax.fill(
             xs,
             ys,
-            facecolor="#cccccc",
-            edgecolor="#888888",
-            alpha=0.4,
+            facecolor=_ZONE_FACE,
+            edgecolor=_ZONE_EDGE,
+            alpha=0.5,
             hatch="//",
             zorder=2,
         )
@@ -746,9 +750,9 @@ def _annotate_pad(ax, pad: dict[str, Any]) -> None:
         xy=(cx, cy),
         xytext=(cx + ox, cy + oy + tilt),
         fontsize=9,
-        color="#111111",
+        color="#F2F2F2",
         zorder=7,
-        path_effects=[pe.withStroke(linewidth=2.4, foreground="white")],
+        path_effects=[pe.withStroke(linewidth=2.4, foreground="#111111")],
     )
 
 
@@ -791,20 +795,17 @@ def _style_axes(ax, bounds: tuple[float, float, float, float]) -> None:
     ax.set_xlim(xmin - margin, xmax + margin)
     ax.set_ylim(ymin - margin, ymax + margin)
     ax.set_aspect("equal")
-    ax.grid(True, linestyle=":", alpha=0.3)
+    ax.grid(True, linestyle=":", color="#3A3A3A", alpha=0.6)
     ax.invert_yaxis()  # KiCad PCB convention: +Y down.
 
 
 def render_board_snapshot(pcb_path: str, out_path: str, pairs: list[PairSpec]) -> None:
-    """Render the router's world model: one panel per copper layer plus an
-    ``overview`` panel stacking them.
+    """Render the router's world model: one panel per copper layer.
 
-    Legend:
-      * line style encodes the layer (solid = F.Cu, dashed = B.Cu, dotted
-        = inner layers); colour encodes the net
-      * dashed red lines = pad pairs still to connect
-      * grey hatched polygons = keepout zones
-      * white-centred rings = vias; grey outlines = component bodies
+    KiCad default theme: dark canvas, traces/pads/via rings coloured by
+    layer (F.Cu red, B.Cu blue, inner layers green/amber/purple), dashed
+    white lines = pad pairs still to connect, grey hatched polygons =
+    keepout zones, light grey outlines = component bodies.
     Pad labels are ``ref.pad`` (e.g. ``R1.1``).
     """
     data = load_pcb(pcb_path)
@@ -813,22 +814,16 @@ def render_board_snapshot(pcb_path: str, out_path: str, pairs: list[PairSpec]) -
     bounds = _snapshot_bounds(data, pads)
     pending = [p for p in pairs if p.status != "done"]
 
-    segment_nets: list[str] = []
-    for node in data:
-        if isinstance(node, list) and _sym(node[0]) == "segment":
-            for sub in node:
-                if isinstance(sub, list) and len(sub) > 2 and _sym(sub[0]) == "net":
-                    segment_nets.append(str(sub[2]))
-    colors = _net_color_map([p["net"] for p in pads] + segment_nets)
     # Only pads referenced by a pair get labels (dense decoy pads stay clean).
     labeled = {(pair.ref_a, pair.pad_a) for pair in pairs} | {
         (pair.ref_b, pair.pad_b) for pair in pairs
     }
 
-    panels = list(all_copper) + ["overview"]
+    panels = list(all_copper)
     cols = 2 if len(panels) > 1 else 1
     rows = (len(panels) + cols - 1) // cols
     fig, axes = plt.subplots(rows, cols, figsize=(7.2 * cols, 5.0 * rows), squeeze=False)
+    fig.patch.set_facecolor(_BG_COLOR)
     flat = [axes[r][c] for r in range(rows) for c in range(cols)]
 
     for i, ax in enumerate(flat):
@@ -836,69 +831,56 @@ def render_board_snapshot(pcb_path: str, out_path: str, pairs: list[PairSpec]) -
             ax.set_visible(False)
             continue
         panel = panels[i]
-        overview = panel == "overview"
+        ax.set_facecolor(_BG_COLOR)
 
         for node in data:
             if not isinstance(node, list) or len(node) < 2:
                 continue
             head = _sym(node[0])
             if head == "zone":
-                _draw_zone(ax, node)
+                _draw_zone(ax, node, panel)
             elif head == "footprint":
                 _draw_footprint_body(ax, node)
             elif head in ("segment", "gr_line"):
-                _draw_segment(ax, node, None if overview else panel, colors)
+                _draw_segment(ax, node, panel)
             elif head == "via":
-                _draw_via(ax, node)
+                _draw_via(ax, node, panel)
 
-        if overview:
-            for p in pads:
-                _draw_pad(ax, p["geo"], p["net"], alpha=0.8, colors=colors)
-            for p in pads:
-                if (p["ref"], p["pad"]) in labeled:
-                    _annotate_pad(ax, p)
-            nets = sorted({p["net"] for p in pads if p["net"] != "?"})
-            legend = (
-                "net colors: "
-                + ", ".join(f"{n}={colors.get(n, '?')}" for n in nets)
-                + " (? = no net)"
-            )
-            ax.text(
-                0.02,
-                0.02,
-                legend,
-                transform=ax.transAxes,
-                fontsize=8,
-                bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": "none"},
-            )
-            ax.set_title("overview — all layers (style = layer, color = net)")
-        else:
-            for p in pads:
-                if panel in p["layers"]:
-                    _draw_pad(
-                        ax,
-                        p["geo"],
-                        p["net"],
-                        alpha=0.45 if len(p["layers"]) > 1 else 1.0,
-                        colors=colors,
-                    )
-            for p in pads:
-                if panel in p["layers"] and (p["ref"], p["pad"]) in labeled:
-                    _annotate_pad(ax, p)
-            ax.set_title(f"{panel} — line style {_LAYER_STYLES.get(panel, '-')}")
+        for p in pads:
+            if panel in p["layers"]:
+                _draw_pad(
+                    ax,
+                    p["geo"],
+                    panel,
+                    alpha=0.45 if len(p["layers"]) > 1 else 1.0,
+                )
+        for p in pads:
+            if panel in p["layers"] and (p["ref"], p["pad"]) in labeled:
+                _annotate_pad(ax, p)
+        ax.set_title(panel, color="#F0F0F0")
 
         for pair in pending:
             a = _pad_center(data, pair.ref_a, pair.pad_a)
             b = _pad_center(data, pair.ref_b, pair.pad_b)
             if a is None or b is None:
                 continue
-            ax.plot([a[0], b[0]], [a[1], b[1]], "r--", linewidth=1.0, alpha=0.8, zorder=6)
+            ax.plot(
+                [a[0], b[0]],
+                [a[1], b[1]],
+                color=_PENDING_COLOR,
+                linestyle="--",
+                linewidth=1.0,
+                alpha=0.9,
+                zorder=6,
+            )
 
         _style_axes(ax, bounds)
 
     fig.suptitle(
-        "PCB world model — dashed red = still to route; solid=F.Cu, dashed=B.Cu, dotted=inner",
-        fontsize=11,
+        "KiCad default theme — F.Cu red, B.Cu blue, inner green/amber; "
+        "dashed white = still to route",
+        fontsize=10,
+        color="#F0F0F0",
     )
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(out_path, dpi=110)
