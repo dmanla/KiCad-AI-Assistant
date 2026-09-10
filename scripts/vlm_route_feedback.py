@@ -48,6 +48,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.patches as mpatches  # noqa: E402
+import matplotlib.patheffects as pe  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 
 # Make the repo root importable (script lives in scripts/).
@@ -74,10 +75,19 @@ DEFAULT_PCB = os.path.join(
 # board (F.Cu top, B.Cu bottom, In1.Cu inner).  Pass --via-pairs to override.
 DEFAULT_VIA_PAIRS: tuple[tuple[str, str], ...] = (("F.Cu", "B.Cu"), ("B.Cu", "In1.Cu"))
 
-_SYSTEM_PROMPT = """You are a PCB routing planner. You will be shown the current
-state of a printed circuit board as an image. Copper pads are drawn as
-rectangles labelled with their reference designator and pad number
-(e.g. "R1.1"); existing routed tracks are drawn as lines between pads.
+_SYSTEM_PROMPT = """You are a PCB routing planner. The image shows the world
+model of a printed circuit board as several panels: one per copper layer
+(F.Cu, B.Cu, In1.Cu, ...) plus an "overview" panel stacking all layers.
+
+Image encoding:
+- Line style encodes the copper layer: solid = F.Cu (top), dashed = B.Cu
+  (bottom), dotted = inner layers.
+- Colour encodes the net; the overview panel lists which colour maps to
+  which net.
+- Copper pads are rectangles labelled ref.pad (e.g. "R1.1").
+- Dashed red lines connect pad pairs that still need routing.
+- Grey hatched polygons are keepout zones; white-centred rings are vias;
+  grey outlines are component bodies.
 
 Your job: decide what to route next. Reply with exactly three lines:
 
@@ -108,6 +118,12 @@ def _sym(value: Any) -> str:
 def _net_color(net: str) -> str:
     idx = abs(hash(net)) % len(_NET_COLORS)
     return _NET_COLORS[idx]
+
+
+def _net_color_map(nets: list[str]) -> dict[str, str]:
+    """Deterministic, repeatable colour per net (no hash collisions)."""
+    ordered = sorted({n for n in nets if n})
+    return {n: _NET_COLORS[i % len(_NET_COLORS)] for i, n in enumerate(ordered)}
 
 
 @dataclass
@@ -440,30 +456,165 @@ def _pad_center(data: list, ref: str, pad_num: str) -> tuple[float, float] | Non
     return None
 
 
-def _draw_pad(ax, geo: Any, net: str) -> None:
-    color = _net_color(net)
+def _draw_pad(
+    ax, geo: Any, net: str, alpha: float = 1.0, colors: dict[str, str] | None = None
+) -> None:
+    color = (colors or {}).get(net) or _net_color(net)
     x, y = geo.bounds[0], geo.bounds[1]
     w = geo.bounds[2] - geo.bounds[0]
     h = geo.bounds[3] - geo.bounds[1]
     ax.add_patch(
         mpatches.Rectangle(
-            (x, y), w, h, facecolor=color, edgecolor="black", linewidth=0.5, zorder=4
+            (x, y),
+            w,
+            h,
+            facecolor=color,
+            edgecolor="black",
+            linewidth=0.5,
+            alpha=alpha,
+            zorder=4,
         )
     )
 
 
-def _draw_line_node(ax, node: list) -> None:
+_LAYER_STYLES = {"F.Cu": "-", "B.Cu": "--", "In1.Cu": ":"}
+_COPPER_ORDER = ("F.Cu", "In1.Cu", "In2.Cu", "In3.Cu", "In4.Cu", "B.Cu")
+
+
+def _draw_segment(ax, node: list, panel: str | None, colors: dict[str, str] | None = None) -> None:
+    """Draw a track/line node; only copper segments on *panel* are drawn.
+
+    ``panel`` is the copper layer being drawn, or None for the overview.
+    """
     start = _node_coord(node, "start")
     end = _node_coord(node, "end")
     if start is None or end is None:
         return
-    if "Edge.Cuts" in [str(s) for s in node] or "F.CrtYd" in [str(s) for s in node]:
-        ax.plot([start[0], end[0]], [start[1], end[1]], "k-", linewidth=0.6, alpha=0.5)
-    else:
-        ax.plot([start[0], end[0]], [start[1], end[1]], "g-", linewidth=1.2)
+    if "Edge.Cuts" in [str(s) for s in node] or "CrtYd" in [str(s) for s in node]:
+        ax.plot(
+            [start[0], end[0]],
+            [start[1], end[1]],
+            "k-",
+            linewidth=0.6,
+            alpha=0.4,
+            zorder=1,
+        )
+        return
+    layer = None
+    net = None
+    for sub in node:
+        if not isinstance(sub, list) or len(sub) < 2:
+            continue
+        if _sym(sub[0]) == "layer":
+            layer = str(sub[1])
+        elif _sym(sub[0]) == "net" and len(sub) > 2:
+            net = str(sub[2])
+    if panel is not None and layer != panel:
+        return
+    color = (colors or {}).get(net or "") or "#555555"
+    linestyle = _LAYER_STYLES.get(layer or "", "-")
+    ax.plot(
+        [start[0], end[0]],
+        [start[1], end[1]],
+        color=color,
+        linestyle=linestyle,
+        linewidth=1.4,
+        alpha=0.85 if panel is None else 1.0,
+        zorder=3,
+    )
 
 
-def _draw_zone(ax, zone: list) -> None:
+def _draw_via(ax, node: list) -> None:
+    """Draw a via as a white-centred ring (it spans the whole stack)."""
+    at = _node_coord(node, "at")
+    if at is None:
+        return
+    diameter = 0.8
+    for sub in node:
+        if isinstance(sub, list) and len(sub) >= 3 and _sym(sub[0]) == "size":
+            try:
+                diameter = float(sub[1])
+            except (TypeError, ValueError):
+                pass
+    ax.add_patch(
+        mpatches.Circle(
+            at,
+            diameter / 2,
+            facecolor="white",
+            edgecolor="black",
+            linewidth=1.0,
+            zorder=4,
+        )
+    )
+
+
+def _draw_footprint_body(ax, fp: list) -> None:
+    """Draw the component silhouette (silkscreen/courtyard) in world coords."""
+    from math import cos, radians, sin
+
+    fx, fy, rot = _footprint_place(fp)
+    a = radians(rot)
+    c, s = cos(a), sin(a)
+
+    def wpt(x: float, y: float) -> tuple[float, float]:
+        return (fx + x * c - y * s, fy + x * s + y * c)
+
+    for sub in fp:
+        if not isinstance(sub, list) or len(sub) < 4:
+            continue
+        kind = _sym(sub[0])
+        if kind not in ("fp_line", "fp_rect", "fp_circle"):
+            continue
+        if not any(
+            isinstance(v, str) and (".SilkS" in v or "CrtYd" in v or ".Fab" in v) for v in sub
+        ):
+            continue
+        if kind == "fp_line":
+            start, end = _node_coord(sub, "start"), _node_coord(sub, "end")
+            if start and end:
+                p1, p2 = wpt(*start), wpt(*end)
+                ax.plot(
+                    [p1[0], p2[0]],
+                    [p1[1], p2[1]],
+                    color="#9e9e9e",
+                    linewidth=0.6,
+                    zorder=1,
+                )
+        elif kind == "fp_rect":
+            start, end = _node_coord(sub, "start"), _node_coord(sub, "end")
+            if start and end:
+                x0, y0, x1, y1 = start[0], start[1], end[0], end[1]
+                pts = [wpt(x, y) for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0))]
+                xs, ys = zip(*pts)
+                ax.plot(xs, ys, color="#9e9e9e", linewidth=0.6, zorder=1)
+        elif kind == "fp_circle":
+            center = _node_coord(sub, "center")
+            if center is None:
+                continue
+            radius = None
+            for ss in sub:
+                if isinstance(ss, list) and len(ss) >= 3 and _sym(ss[0]) == "end":
+                    try:
+                        dx = float(ss[1]) - center[0]
+                        dy = float(ss[2]) - center[1]
+                        radius = (dx * dx + dy * dy) ** 0.5
+                    except (TypeError, ValueError):
+                        pass
+            if radius is not None:
+                ax.add_patch(
+                    mpatches.Circle(
+                        wpt(*center),
+                        radius,
+                        fill=False,
+                        edgecolor="#9e9e9e",
+                        linewidth=0.6,
+                        zorder=1,
+                    )
+                )
+
+
+def _zone_points(zone: list) -> list[tuple[float, float]]:
+    """Polygon vertices of a zone/keepout node in world coordinates."""
     pts: list[tuple[float, float]] = []
     for sub in zone:
         if not isinstance(sub, list) or _sym(sub[0]) != "polygon":
@@ -473,94 +624,283 @@ def _draw_zone(ax, zone: list) -> None:
                 continue
             for xy in pts_node[1:]:
                 if isinstance(xy, list) and len(xy) >= 3 and _sym(xy[0]) == "xy":
-                    pts.append((float(xy[1]), float(xy[2])))
+                    try:
+                        pts.append((float(xy[1]), float(xy[2])))
+                    except (TypeError, ValueError):
+                        pass
+    return pts
+
+
+def _draw_zone(ax, zone: list) -> None:
+    pts = _zone_points(zone)
     if len(pts) >= 3:
         xs = [p[0] for p in pts]
         ys = [p[1] for p in pts]
-        ax.fill(xs, ys, facecolor="#cccccc", edgecolor="#888888", alpha=0.4, hatch="//", zorder=2)
+        ax.fill(
+            xs,
+            ys,
+            facecolor="#cccccc",
+            edgecolor="#888888",
+            alpha=0.4,
+            hatch="//",
+            zorder=2,
+        )
 
 
-def render_board_snapshot(pcb_path: str, out_path: str, pairs: list[PairSpec]) -> None:
-    """Render an annotated board snapshot: pads labelled ref.pad, nets coloured.
+def _pad_layers(pad: list) -> list[str]:
+    """Raw layer list of a pad node (copper + mask + paste)."""
+    for sub in pad:
+        if isinstance(sub, list) and len(sub) >= 2 and _sym(sub[0]) == "layers":
+            return [str(v) for v in sub[1:] if isinstance(v, str)]
+    return []
 
-    Unrouted pairs are drawn as dashed lines between the two pad centres so
-    the VLM can see exactly what still needs connecting.
-    """
-    data = load_pcb(pcb_path)
 
-    fig, ax = plt.subplots(1, 1, figsize=(12, 9))
-    ax.set_aspect("equal")
-    ax.set_title("PCB current state — pads labelled ref.pad, dashed lines = still to route")
+def _pad_copper_layers(pad: list, all_copper: list[str]) -> list[str]:
+    """Copper layers a pad occupies; ``*.Cu`` expands to the full stack."""
+    out: list[str] = []
+    for lay in _pad_layers(pad):
+        if lay == "*.Cu":
+            out.extend(all_copper)
+        elif lay.endswith(".Cu") and lay not in out:
+            out.append(lay)
+    return list(dict.fromkeys(out))
 
-    pad_shapes: list[tuple[Any, str, str]] = []
+
+def _copper_layers(data: list) -> list[str]:
+    """Copper layers present on the board, in KiCad stack order."""
+    found: set[str] = set()
     for node in data:
         if not isinstance(node, list) or len(node) < 2:
             continue
         head = _sym(node[0])
-        if head in ("segment", "gr_line"):
-            _draw_line_node(ax, node)
-        elif head == "footprint":
-            ref = _footprint_ref(node)
-            if ref is None:
-                continue
-            fp_at = _footprint_place(node)
+        if head == "segment":
             for sub in node:
-                if not isinstance(sub, list) or len(sub) < 2:
-                    continue
-                if _sym(sub[0]) != "pad":
-                    continue
-                geo = _pad_geometry(sub, (fp_at[0], fp_at[1]), fp_at[2])
-                if geo is None:
-                    continue
-                pad_num = sub[1] if isinstance(sub[1], str) else str(sub[1])
-                net = _pad_net(sub) or "?"
-                center = geo.centroid
-                _draw_pad(ax, geo, net)
-                ax.annotate(
-                    f"{ref}.{pad_num}",
-                    xy=(center.x, center.y),
-                    xytext=(center.x + 0.35, center.y + 0.35),
-                    fontsize=7,
-                    color="black",
-                    zorder=5,
-                )
-                pad_shapes.append((geo, net, ref))
-        elif head == "zone":
-            _draw_zone(ax, node)
+                if isinstance(sub, list) and len(sub) >= 2 and _sym(sub[0]) == "layer":
+                    lay = str(sub[1])
+                    if lay.endswith(".Cu"):
+                        found.add(lay)
+        elif head == "via":
+            for sub in node:
+                if isinstance(sub, list) and len(sub) >= 2 and _sym(sub[0]) == "layers":
+                    for v in sub[1:]:
+                        if isinstance(v, str) and v != "*.Cu" and v.endswith(".Cu"):
+                            found.add(v)
+        elif head == "footprint":
+            for sub in node:
+                if isinstance(sub, list) and len(sub) >= 2 and _sym(sub[0]) == "pad":
+                    for lay in _pad_layers(sub):
+                        if lay != "*.Cu" and lay.endswith(".Cu"):
+                            found.add(lay)
+    if not found:
+        return ["F.Cu", "B.Cu"]
+    return sorted(
+        found,
+        key=lambda l: _COPPER_ORDER.index(l) if l in _COPPER_ORDER else len(_COPPER_ORDER),
+    )
 
-    # Dashed lines for pairs still to route (drawn on pad centres).
-    for pair in pairs:
-        if pair.status == "done":
-            continue
-        a = _pad_center(data, pair.ref_a, pair.pad_a)
-        b = _pad_center(data, pair.ref_b, pair.pad_b)
-        if a is None or b is None:
-            continue
-        ax.plot(
-            [a[0], b[0]],
-            [a[1], b[1]],
-            "r--",
-            linewidth=1.0,
-            alpha=0.7,
-            zorder=3,
-        )
 
-    # Keep the board's own bounds; fall back to pad bounds.
+def _collect_pads(data: list, all_copper: list[str]) -> list[dict[str, Any]]:
+    """Pad info in world coords: shape, net, copper layers and centre."""
+    out: list[dict[str, Any]] = []
+    for node in data:
+        if not isinstance(node, list) or len(node) < 2 or _sym(node[0]) != "footprint":
+            continue
+        ref = _footprint_ref(node)
+        if ref is None:
+            continue
+        fp_at = _footprint_place(node)
+        for sub in node:
+            if not isinstance(sub, list) or len(sub) < 2 or _sym(sub[0]) != "pad":
+                continue
+            geo = _pad_geometry(sub, (fp_at[0], fp_at[1]), fp_at[2])
+            if geo is None:
+                continue
+            out.append(
+                {
+                    "ref": ref,
+                    "pad": str(sub[1]) if not isinstance(sub[1], list) else "",
+                    "geo": geo,
+                    "net": _pad_net(sub) or "?",
+                    "layers": _pad_copper_layers(sub, all_copper),
+                    "center": (geo.centroid.x, geo.centroid.y),
+                    "fp_center": (fp_at[0], fp_at[1]),
+                }
+            )
+    return out
+
+
+def _annotate_pad(ax, pad: dict[str, Any]) -> None:
+    """Label a pad away from its footprint centre; alternating pads on the
+    same footprint are tilted up/down so neighbour labels do not collide."""
+    cx, cy = pad["center"]
+    fx, fy = pad.get("fp_center", (cx, cy))
+    dx, dy = cx - fx, cy - fy
+    norm = (dx * dx + dy * dy) ** 0.5 or 1.0
+    ox, oy = 0.8 * dx / norm, 0.8 * dy / norm
+    try:
+        tilt = 0.4 if int(pad["pad"]) % 2 == 0 else -0.4
+    except (TypeError, ValueError):
+        tilt = 0.4
+    ax.annotate(
+        f"{pad['ref']}.{pad['pad']}",
+        xy=(cx, cy),
+        xytext=(cx + ox, cy + oy + tilt),
+        fontsize=9,
+        color="#111111",
+        zorder=7,
+        path_effects=[pe.withStroke(linewidth=2.4, foreground="white")],
+    )
+
+
+def _snapshot_bounds(data: list, pads: list[dict[str, Any]]) -> tuple[float, float, float, float]:
+    """Union of pad, zone and segment extents, with a default fallback."""
     xmin = ymin = 1e9
     xmax = ymax = -1e9
-    for geo, _net, _ref in pad_shapes:
-        bounds = geo.bounds
-        xmin = min(xmin, bounds[0])
-        ymin = min(ymin, bounds[1])
-        xmax = max(xmax, bounds[2])
-        ymax = max(ymax, bounds[3])
-    if xmin < xmax:
-        margin = 2.0
-        ax.set_xlim(xmin - margin, xmax + margin)
-        ax.set_ylim(ymin - margin, ymax + margin)
+
+    def grow(x: float, y: float) -> None:
+        nonlocal xmin, ymin, xmax, ymax
+        xmin = min(xmin, x)
+        ymin = min(ymin, y)
+        xmax = max(xmax, x)
+        ymax = max(ymax, y)
+
+    for p in pads:
+        b = p["geo"].bounds
+        grow(b[0], b[1])
+        grow(b[2], b[3])
+    for node in data:
+        if not isinstance(node, list):
+            continue
+        head = _sym(node[0])
+        if head == "zone":
+            for px, py in _zone_points(node):
+                grow(px, py)
+        elif head in ("segment", "gr_line"):
+            for name in ("start", "end"):
+                pt = _node_coord(node, name)
+                if pt:
+                    grow(pt[0], pt[1])
+    if xmin >= xmax or ymin >= ymax:
+        return (0.0, 0.0, 1.0, 1.0)
+    return (xmin, ymin, xmax, ymax)
+
+
+def _style_axes(ax, bounds: tuple[float, float, float, float]) -> None:
+    xmin, ymin, xmax, ymax = bounds
+    margin = 2.0
+    ax.set_xlim(xmin - margin, xmax + margin)
+    ax.set_ylim(ymin - margin, ymax + margin)
+    ax.set_aspect("equal")
     ax.grid(True, linestyle=":", alpha=0.3)
     ax.invert_yaxis()  # KiCad PCB convention: +Y down.
-    fig.tight_layout()
+
+
+def render_board_snapshot(pcb_path: str, out_path: str, pairs: list[PairSpec]) -> None:
+    """Render the router's world model: one panel per copper layer plus an
+    ``overview`` panel stacking them.
+
+    Legend:
+      * line style encodes the layer (solid = F.Cu, dashed = B.Cu, dotted
+        = inner layers); colour encodes the net
+      * dashed red lines = pad pairs still to connect
+      * grey hatched polygons = keepout zones
+      * white-centred rings = vias; grey outlines = component bodies
+    Pad labels are ``ref.pad`` (e.g. ``R1.1``).
+    """
+    data = load_pcb(pcb_path)
+    all_copper = _copper_layers(data)
+    pads = _collect_pads(data, all_copper)
+    bounds = _snapshot_bounds(data, pads)
+    pending = [p for p in pairs if p.status != "done"]
+
+    segment_nets: list[str] = []
+    for node in data:
+        if isinstance(node, list) and _sym(node[0]) == "segment":
+            for sub in node:
+                if isinstance(sub, list) and len(sub) > 2 and _sym(sub[0]) == "net":
+                    segment_nets.append(str(sub[2]))
+    colors = _net_color_map([p["net"] for p in pads] + segment_nets)
+    # Only pads referenced by a pair get labels (dense decoy pads stay clean).
+    labeled = {(pair.ref_a, pair.pad_a) for pair in pairs} | {
+        (pair.ref_b, pair.pad_b) for pair in pairs
+    }
+
+    panels = list(all_copper) + ["overview"]
+    cols = 2 if len(panels) > 1 else 1
+    rows = (len(panels) + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(7.2 * cols, 5.0 * rows), squeeze=False)
+    flat = [axes[r][c] for r in range(rows) for c in range(cols)]
+
+    for i, ax in enumerate(flat):
+        if i >= len(panels):
+            ax.set_visible(False)
+            continue
+        panel = panels[i]
+        overview = panel == "overview"
+
+        for node in data:
+            if not isinstance(node, list) or len(node) < 2:
+                continue
+            head = _sym(node[0])
+            if head == "zone":
+                _draw_zone(ax, node)
+            elif head == "footprint":
+                _draw_footprint_body(ax, node)
+            elif head in ("segment", "gr_line"):
+                _draw_segment(ax, node, None if overview else panel, colors)
+            elif head == "via":
+                _draw_via(ax, node)
+
+        if overview:
+            for p in pads:
+                _draw_pad(ax, p["geo"], p["net"], alpha=0.8, colors=colors)
+            for p in pads:
+                if (p["ref"], p["pad"]) in labeled:
+                    _annotate_pad(ax, p)
+            nets = sorted({p["net"] for p in pads if p["net"] != "?"})
+            legend = (
+                "net colors: "
+                + ", ".join(f"{n}={colors.get(n, '?')}" for n in nets)
+                + " (? = no net)"
+            )
+            ax.text(
+                0.02,
+                0.02,
+                legend,
+                transform=ax.transAxes,
+                fontsize=8,
+                bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": "none"},
+            )
+            ax.set_title("overview — all layers (style = layer, color = net)")
+        else:
+            for p in pads:
+                if panel in p["layers"]:
+                    _draw_pad(
+                        ax,
+                        p["geo"],
+                        p["net"],
+                        alpha=0.45 if len(p["layers"]) > 1 else 1.0,
+                        colors=colors,
+                    )
+            for p in pads:
+                if panel in p["layers"] and (p["ref"], p["pad"]) in labeled:
+                    _annotate_pad(ax, p)
+            ax.set_title(f"{panel} — line style {_LAYER_STYLES.get(panel, '-')}")
+
+        for pair in pending:
+            a = _pad_center(data, pair.ref_a, pair.pad_a)
+            b = _pad_center(data, pair.ref_b, pair.pad_b)
+            if a is None or b is None:
+                continue
+            ax.plot([a[0], b[0]], [a[1], b[1]], "r--", linewidth=1.0, alpha=0.8, zorder=6)
+
+        _style_axes(ax, bounds)
+
+    fig.suptitle(
+        "PCB world model — dashed red = still to route; solid=F.Cu, dashed=B.Cu, dotted=inner",
+        fontsize=11,
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(out_path, dpi=110)
     plt.close(fig)
 

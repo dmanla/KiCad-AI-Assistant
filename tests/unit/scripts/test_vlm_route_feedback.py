@@ -251,3 +251,34 @@ def test_parse_via_pairs() -> None:
 def test_parse_via_pairs_rejects_bad_token() -> None:
     with pytest.raises(argparse.ArgumentTypeError):
         vrf._parse_via_pairs("F.Cu-B.Cu")
+
+
+# ---------------------------------------------------------------------------
+# world-model rendering
+# ---------------------------------------------------------------------------
+
+
+def test_copper_layers_detected_from_board(board_copy: str) -> None:
+    data = vrf.load_pcb(board_copy)
+    layers = vrf._copper_layers(data)
+    assert "F.Cu" in layers  # R1/C1/U1 SMD pads and the VCC track
+    assert "In1.Cu" in layers  # D1 lives on the inner copper layer
+    assert layers.index("F.Cu") < layers.index("In1.Cu")  # KiCad stack order
+
+
+def test_pad_copper_layers_expands_thru_holes() -> None:
+    smd = ["pad", "1", "smd", "rect", ["at", 0.0, 0.0], ["layers", "F.Cu", "F.Paste", "F.Mask"]]
+    assert vrf._pad_copper_layers(smd, ["F.Cu", "B.Cu"]) == ["F.Cu"]
+    thru = ["pad", "1", "thru_hole", "circle", ["at", 0.0, 0.0], ["layers", "*.Cu", "*.Mask"]]
+    assert vrf._pad_copper_layers(thru, ["F.Cu", "B.Cu", "In1.Cu"]) == [
+        "F.Cu",
+        "B.Cu",
+        "In1.Cu",
+    ]
+
+
+def test_render_world_model_writes_png(board_copy: str, tmp_path: Path) -> None:
+    out = tmp_path / "snapshot.png"
+    vrf.render_board_snapshot(board_copy, str(out), [])
+    assert out.exists()
+    assert out.stat().st_size > 10_000
