@@ -550,7 +550,18 @@ def _fp_shape_layer(shape: list) -> str | None:
     return None
 
 
-def _draw_footprint_body(ax, fp: list) -> None:
+def _shape_visible_on(layer: str | None, panel: str) -> bool:
+    """Front/back/copper shapes show only on their own side's panel."""
+    if layer is None:
+        return False
+    if layer.startswith("F."):
+        return panel == "F.Cu"
+    if layer.startswith("B."):
+        return panel == "B.Cu"
+    return layer == panel
+
+
+def _draw_footprint_body(ax, fp: list, panel: str) -> None:
     """Draw the component silhouette (silkscreen/courtyard) in world coords."""
     from math import cos, radians, sin
 
@@ -569,6 +580,8 @@ def _draw_footprint_body(ax, fp: list) -> None:
             continue
         layer = _fp_shape_layer(sub)
         if layer is None or not (".SilkS" in layer or "CrtYd" in layer or ".Fab" in layer):
+            continue
+        if not _shape_visible_on(layer, panel):
             continue
         if kind == "fp_line":
             start, end = _node_coord(sub, "start"), _node_coord(sub, "end")
@@ -846,7 +859,7 @@ def render_board_snapshot(pcb_path: str, out_path: str, pairs: list[PairSpec]) -
             if head == "zone":
                 _draw_zone(ax, node, panel)
             elif head == "footprint":
-                _draw_footprint_body(ax, node)
+                _draw_footprint_body(ax, node, panel)
             elif head in ("segment", "gr_line"):
                 _draw_segment(ax, node, panel)
             elif head == "via":
@@ -865,7 +878,14 @@ def render_board_snapshot(pcb_path: str, out_path: str, pairs: list[PairSpec]) -
                 _annotate_pad(ax, p)
         ax.set_title(panel, color="#F0F0F0")
 
+        # A pending pair connects pads; ratlines show only on panels where
+        # at least one endpoint has copper (thru-hole pads span every layer).
+        pad_layers = {(p["ref"], p["pad"]): set(p["layers"]) for p in pads}
         for pair in pending:
+            la = pad_layers.get((pair.ref_a, pair.pad_a), set(all_copper))
+            lb = pad_layers.get((pair.ref_b, pair.pad_b), set(all_copper))
+            if panel not in (la | lb):
+                continue
             a = _pad_center(data, pair.ref_a, pair.pad_a)
             b = _pad_center(data, pair.ref_b, pair.pad_b)
             if a is None or b is None:

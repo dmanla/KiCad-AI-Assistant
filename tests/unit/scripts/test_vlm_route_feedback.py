@@ -325,8 +325,11 @@ def test_draw_footprint_body_draws_courtyard() -> None:
         ],
     ]
     ax = _RecordingAxes()
-    vrf._draw_footprint_body(ax, fp)
+    vrf._draw_footprint_body(ax, fp, "F.Cu")
     assert len(ax.lines) == 4
     x0, y0 = ax.lines[0]
     assert x0 == [29.0, 31.0]
     assert y0 == [29.5, 29.5]
+    ax_inner = _RecordingAxes()
+    vrf._draw_footprint_body(ax_inner, fp, "In1.Cu")
+    assert ax_inner.lines == []  # front shapes are not visible on inner panels
