@@ -302,34 +302,89 @@ class _RecordingAxes:
         pass
 
 
+def _courtyard_fp(
+    *,
+    pad_layers: list[str] | None,
+    pad_type: str = "smd",
+    at: tuple[float, float, float] = (30.0, 30.0, 0.0),
+) -> list:
+    """A footprint with a single pad and a four-line F.CrtYd courtyard."""
+    fp: list = ["footprint", ["at", at[0], at[1], at[2]]]
+    if pad_layers is not None:
+        fp.append(["pad", "1", pad_type, ["layers", *pad_layers], ["net", "1", "VCC"]])
+    fp.extend(
+        [
+            [
+                "fp_line",
+                ["start", -1.0, -0.5],
+                ["end", 1.0, -0.5],
+                ["layer", "F.CrtYd"],
+                ["width", 0.05],
+            ],
+            [
+                "fp_line",
+                ["start", 1.0, -0.5],
+                ["end", 1.0, 0.5],
+                ["layer", "F.CrtYd"],
+                ["width", 0.05],
+            ],
+            [
+                "fp_line",
+                ["start", 1.0, 0.5],
+                ["end", -1.0, 0.5],
+                ["layer", "F.CrtYd"],
+                ["width", 0.05],
+            ],
+            [
+                "fp_line",
+                ["start", -1.0, 0.5],
+                ["end", -1.0, -0.5],
+                ["layer", "F.CrtYd"],
+                ["width", 0.05],
+            ],
+        ]
+    )
+    return fp
+
+
 def test_draw_footprint_body_draws_courtyard() -> None:
-    """A courtyard fp_line on F.CrtYd must emit a plot in world coords."""
-    fp = [
-        "footprint",
-        ["at", 30.0, 30.0, 0.0],
-        [
-            "fp_line",
-            ["start", -1.0, -0.5],
-            ["end", 1.0, -0.5],
-            ["layer", "F.CrtYd"],
-            ["width", 0.05],
-        ],
-        ["fp_line", ["start", 1.0, -0.5], ["end", 1.0, 0.5], ["layer", "F.CrtYd"], ["width", 0.05]],
-        ["fp_line", ["start", 1.0, 0.5], ["end", -1.0, 0.5], ["layer", "F.CrtYd"], ["width", 0.05]],
-        [
-            "fp_line",
-            ["start", -1.0, 0.5],
-            ["end", -1.0, -0.5],
-            ["layer", "F.CrtYd"],
-            ["width", 0.05],
-        ],
-    ]
+    """A front-pad footprint draws its courtyard on F.Cu, not on inner layers."""
+    fp = _courtyard_fp(pad_layers=["F.Cu", "F.Paste", "F.Mask"])
     ax = _RecordingAxes()
-    vrf._draw_footprint_body(ax, fp, "F.Cu")
+    vrf._draw_footprint_body(ax, fp, "F.Cu", ["F.Cu", "In1.Cu"])
     assert len(ax.lines) == 4
     x0, y0 = ax.lines[0]
     assert x0 == [29.0, 31.0]
     assert y0 == [29.5, 29.5]
     ax_inner = _RecordingAxes()
-    vrf._draw_footprint_body(ax_inner, fp, "In1.Cu")
-    assert ax_inner.lines == []  # front shapes are not visible on inner panels
+    vrf._draw_footprint_body(ax_inner, fp, "In1.Cu", ["F.Cu", "In1.Cu"])
+    assert ax_inner.lines == []  # no copper on this panel -> no hollow outline
+
+
+def test_draw_footprint_body_follows_pad_copper() -> None:
+    """A footprint whose pads live on an inner layer draws its body there."""
+    fp = _courtyard_fp(pad_layers=["In1.Cu", "B.Paste", "B.Mask"])
+    ax_body = _RecordingAxes()
+    vrf._draw_footprint_body(ax_body, fp, "In1.Cu", ["F.Cu", "In1.Cu"])
+    assert len(ax_body.lines) == 4
+    ax_phantom = _RecordingAxes()
+    vrf._draw_footprint_body(ax_phantom, fp, "F.Cu", ["F.Cu", "In1.Cu"])
+    assert ax_phantom.lines == []  # pads are elsewhere; no outline on F.Cu
+
+
+def test_draw_footprint_body_without_pads_is_hidden() -> None:
+    """A padless footprint has no copper, so its body is drawn nowhere."""
+    fp = _courtyard_fp(pad_layers=None)
+    for panel in ("F.Cu", "In1.Cu"):
+        ax = _RecordingAxes()
+        vrf._draw_footprint_body(ax, fp, panel, ["F.Cu", "In1.Cu"])
+        assert ax.lines == []
+
+
+def test_draw_footprint_body_thru_hole_spans_all_layers() -> None:
+    """A thru-hole pad (*.Cu) keeps its body visible on every copper panel."""
+    fp = _courtyard_fp(pad_layers=["*.Cu", "F.Mask"], pad_type="thru_hole")
+    for panel in ("F.Cu", "In1.Cu"):
+        ax = _RecordingAxes()
+        vrf._draw_footprint_body(ax, fp, panel, ["F.Cu", "In1.Cu"])
+        assert len(ax.lines) == 4

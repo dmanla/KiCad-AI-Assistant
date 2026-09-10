@@ -550,21 +550,27 @@ def _fp_shape_layer(shape: list) -> str | None:
     return None
 
 
-def _shape_visible_on(layer: str | None, panel: str) -> bool:
-    """Front/back/copper shapes show only on their own side's panel."""
-    if layer is None:
-        return False
-    if layer.startswith("F."):
-        return panel == "F.Cu"
-    if layer.startswith("B."):
-        return panel == "B.Cu"
-    return layer == panel
+def _footprint_copper_layers(fp: list, all_copper: list[str]) -> set[str]:
+    """Copper layers a footprint has pads on (``*.Cu`` pads span the stack)."""
+    layers: set[str] = set()
+    for sub in fp:
+        if isinstance(sub, list) and len(sub) >= 2 and _sym(sub[0]) == "pad":
+            layers.update(_pad_copper_layers(sub, all_copper))
+    return layers
 
 
-def _draw_footprint_body(ax, fp: list, panel: str) -> None:
-    """Draw the component silhouette (silkscreen/courtyard) in world coords."""
+def _draw_footprint_body(ax, fp: list, panel: str, all_copper: list[str]) -> None:
+    """Draw the component silhouette (silkscreen/courtyard) in world coords.
+
+    The body is only drawn on panels where the footprint itself has copper;
+    a component whose pads live on another layer must not leave a hollow
+    outline on a layer it does not occupy.
+    """
     from math import cos, radians, sin
 
+    copper = _footprint_copper_layers(fp, all_copper)
+    if panel not in copper:
+        return
     fx, fy, rot = _footprint_place(fp)
     a = radians(rot)
     c, s = cos(a), sin(a)
@@ -580,8 +586,6 @@ def _draw_footprint_body(ax, fp: list, panel: str) -> None:
             continue
         layer = _fp_shape_layer(sub)
         if layer is None or not (".SilkS" in layer or "CrtYd" in layer or ".Fab" in layer):
-            continue
-        if not _shape_visible_on(layer, panel):
             continue
         if kind == "fp_line":
             start, end = _node_coord(sub, "start"), _node_coord(sub, "end")
@@ -859,7 +863,7 @@ def render_board_snapshot(pcb_path: str, out_path: str, pairs: list[PairSpec]) -
             if head == "zone":
                 _draw_zone(ax, node, panel)
             elif head == "footprint":
-                _draw_footprint_body(ax, node, panel)
+                _draw_footprint_body(ax, node, panel, all_copper)
             elif head in ("segment", "gr_line"):
                 _draw_segment(ax, node, panel)
             elif head == "via":
