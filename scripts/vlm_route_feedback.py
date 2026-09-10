@@ -878,13 +878,14 @@ def render_board_snapshot(pcb_path: str, out_path: str, pairs: list[PairSpec]) -
                 _annotate_pad(ax, p)
         ax.set_title(panel, color="#F0F0F0")
 
-        # A pending pair connects pads; ratlines show only on panels where
-        # at least one endpoint has copper (thru-hole pads span every layer).
+        # A pending pair connects pads; a ratline is drawn only on panels
+        # where both endpoint pads are visible (thru-hole pads span every
+        # layer, so they never hide their pairs).
         pad_layers = {(p["ref"], p["pad"]): set(p["layers"]) for p in pads}
         for pair in pending:
             la = pad_layers.get((pair.ref_a, pair.pad_a), set(all_copper))
             lb = pad_layers.get((pair.ref_b, pair.pad_b), set(all_copper))
-            if panel not in (la | lb):
+            if panel not in la or panel not in lb:
                 continue
             a = _pad_center(data, pair.ref_a, pair.pad_a)
             b = _pad_center(data, pair.ref_b, pair.pad_b)
