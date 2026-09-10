@@ -543,6 +543,13 @@ def _draw_via(ax, node: list, panel: str) -> None:
     )
 
 
+def _fp_shape_layer(shape: list) -> str | None:
+    for sub in shape:
+        if isinstance(sub, list) and len(sub) >= 2 and _sym(sub[0]) == "layer":
+            return str(sub[1])
+    return None
+
+
 def _draw_footprint_body(ax, fp: list) -> None:
     """Draw the component silhouette (silkscreen/courtyard) in world coords."""
     from math import cos, radians, sin
@@ -560,9 +567,8 @@ def _draw_footprint_body(ax, fp: list) -> None:
         kind = _sym(sub[0])
         if kind not in ("fp_line", "fp_rect", "fp_circle"):
             continue
-        if not any(
-            isinstance(v, str) and (".SilkS" in v or "CrtYd" in v or ".Fab" in v) for v in sub
-        ):
+        layer = _fp_shape_layer(sub)
+        if layer is None or not (".SilkS" in layer or "CrtYd" in layer or ".Fab" in layer):
             continue
         if kind == "fp_line":
             start, end = _node_coord(sub, "start"), _node_coord(sub, "end")

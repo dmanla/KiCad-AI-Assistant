@@ -278,7 +278,55 @@ def test_pad_copper_layers_expands_thru_holes() -> None:
 
 
 def test_render_world_model_writes_png(board_copy: str, tmp_path: Path) -> None:
+    pairs = [vrf.PairSpec(ref_a="R1", pad_a="1", ref_b="C1", pad_b="1", net="VCC")]
+    out = tmp_path / "snap.png"
+    vrf.render_board_snapshot(board_copy, str(out), pairs)
+    assert out.exists()
+    assert out.stat().st_size > 1000
     out = tmp_path / "snapshot.png"
     vrf.render_board_snapshot(board_copy, str(out), [])
     assert out.exists()
     assert out.stat().st_size > 10_000
+
+
+class _RecordingAxes:
+    """Minimal stand-in for matplotlib Axes that records plot calls."""
+
+    def __init__(self) -> None:
+        self.lines: list[tuple[list[float], list[float]]] = []
+
+    def plot(self, xs, ys, **kwargs) -> None:
+        self.lines.append((list(xs), list(ys)))
+
+    def add_patch(self, patch) -> None:
+        pass
+
+
+def test_draw_footprint_body_draws_courtyard() -> None:
+    """A courtyard fp_line on F.CrtYd must emit a plot in world coords."""
+    fp = [
+        "footprint",
+        ["at", 30.0, 30.0, 0.0],
+        [
+            "fp_line",
+            ["start", -1.0, -0.5],
+            ["end", 1.0, -0.5],
+            ["layer", "F.CrtYd"],
+            ["width", 0.05],
+        ],
+        ["fp_line", ["start", 1.0, -0.5], ["end", 1.0, 0.5], ["layer", "F.CrtYd"], ["width", 0.05]],
+        ["fp_line", ["start", 1.0, 0.5], ["end", -1.0, 0.5], ["layer", "F.CrtYd"], ["width", 0.05]],
+        [
+            "fp_line",
+            ["start", -1.0, 0.5],
+            ["end", -1.0, -0.5],
+            ["layer", "F.CrtYd"],
+            ["width", 0.05],
+        ],
+    ]
+    ax = _RecordingAxes()
+    vrf._draw_footprint_body(ax, fp)
+    assert len(ax.lines) == 4
+    x0, y0 = ax.lines[0]
+    assert x0 == [29.0, 31.0]
+    assert y0 == [29.5, 29.5]
