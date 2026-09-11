@@ -270,21 +270,34 @@ def _rounded_rect_points(w: float, h: float, r: float, n: int = 8) -> list[tuple
 def _oval_points(w: float, h: float, n: int = 12) -> list[tuple[float, float]]:
     """Capsule outline (KiCad OVAL) centered at the origin.
 
-    Half-circle caps of radius min(w, h) / 2 placed at the ends of the long
-    axis, connected by straight segments -- exactly KiCad's
-    TransformOvalToPolygon geometry.
+    half-circle cap of radius min(w, h) / 2 at each end.  Caps sweep the
+    long-axis ends, so a vertical capsule (h > w) gets top/bottom
+    semicircles and a horizontal one (w > h) gets left/right ones.
     """
-    dx, dy = w / 2, h / 2
-    half = min(dx, dy)
-    r = half
-    off_x, off_y = dx - half, dy - half
+    r = min(w, h) / 2
     pts: list[tuple[float, float]] = []
-    for i in range(n + 1):
-        a = math.radians(-90.0 + 180.0 * i / n)
-        pts.append((off_x + r * math.cos(a), off_y + r * math.sin(a)))
-    for i in range(n + 1):
-        a = math.radians(90.0 + 180.0 * i / n)
-        pts.append((-off_x + r * math.cos(a), -off_y + r * math.sin(a)))
+    if w >= h:
+        # Horizontal capsule: caps at x = +-hlx, straight edges at y = +-r.
+        hlx = w / 2 - r
+        for i in range(n + 1):
+            a = math.radians(-90.0 + 180.0 * i / n)
+            pts.append((hlx + r * math.cos(a), r * math.sin(a)))
+        pts.append((-hlx, r))
+        for i in range(n + 1):
+            a = math.radians(90.0 + 180.0 * i / n)
+            pts.append((-hlx + r * math.cos(a), r * math.sin(a)))
+        pts.append((hlx, -r))
+    else:
+        # Vertical capsule: caps at y = +-hly, straight edges at x = +-r.
+        hly = h / 2 - r
+        for i in range(n + 1):
+            a = math.radians(0.0 + 180.0 * i / n)
+            pts.append((r * math.cos(a), hly + r * math.sin(a)))
+        pts.append((-r, -hly))
+        for i in range(n + 1):
+            a = math.radians(180.0 + 180.0 * i / n)
+            pts.append((r * math.cos(a), -hly + r * math.sin(a)))
+        pts.append((r, hly))
     return pts
 
 
