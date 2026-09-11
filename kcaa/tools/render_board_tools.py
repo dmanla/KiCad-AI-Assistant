@@ -110,12 +110,17 @@ def _copper_layers(data: list) -> list[str]:
 
 
 def _wpt(fp: tuple[float, float, float], x: float, y: float) -> tuple[float, float]:
-    """Transform a footprint-local point to world coordinates."""
+    """Transform a footprint-local point to world coordinates.
+
+    Mirrors KiCad's TRANSFORM_TRS::Apply + RotatePoint (Y-down world
+    space): +angle rotates counter-clockwise as seen on screen, i.e.
+    the point (x, y) maps to (x*cos + y*sin, y*cos - x*sin).
+    """
     fx, fy, rot = fp
     if rot:
         a = math.radians(rot)
         c, s = math.cos(a), math.sin(a)
-        x, y = x * c - y * s, x * s + y * c
+        x, y = x * c + y * s, y * c - x * s
     return (fx + x, fy + y)
 
 
@@ -145,9 +150,11 @@ class BoardData:
 def _build_pad_shape(pad: list, fp: tuple[float, float, float]) -> Any | None:
     """Build a matplotlib patch for a pad at world coordinates.
 
-    The patch is centered on the pad center (KiCad pads rotate about their
-    center; matplotlib's Rectangle angle rotates about its lower-left
-    anchor, so rotated rects are built explicitly from rotated corners).
+    The patch is centered on the pad center.  KiCad pads rotate about their
+    center; the outline is built in pad-local coordinates (origin at the pad
+    center), rotated with KiCad's RotatePoint convention (Y-down world, so
+    +angle is counter-clockwise on screen), then translated to the pad's
+    world position.
     """
     at = _node_coord(pad, "at")
     size = _node_coord(pad, "size")
@@ -161,8 +168,14 @@ def _build_pad_shape(pad: list, fp: tuple[float, float, float]) -> Any | None:
                 pad_rot = float(sub[3])
             except (TypeError, ValueError):
                 pad_rot = 0.0
-    total_rot = pad_rot + fp[2]
+    # The pad's rotation in the file is a board-frame absolute angle; KiCad's
+    # parser stores it via SetOrientation() (angle - footprint rotation) and
+    # renders with GetOrientation() = lib_rot + fp_rot == the file angle.
+    # So shape rotation is pad_rot alone; only the pad *position* goes
+    # through the footprint transform (_wpt).
+    total_rot = pad_rot
     pad_shape = str(pad[3]) if len(pad) > 3 else ("rect" if len(pad) < 3 else str(pad[2]))
+    center = _wpt(fp, at[0], at[1])
 
     # Custom pads carry (primitives ...) geometry; fall back to the size box.
     primitives = None
@@ -186,35 +199,93 @@ def _build_pad_shape(pad: list, fp: tuple[float, float, float]) -> Any | None:
                                 except (TypeError, ValueError):
                                     pass
         if pts:
-            # Primitive coords are in the pad's local frame; rotate by pad
-            # rotation, translate by the pad position, then footprint transform.
+            # Primitive coords live in the pad's local frame (origin at the
+            # pad position), and the pad rotation in the file is a
+            # board-frame absolute angle -- KiCad renders them as
+            # ``outline.Rotate(GetOrientation()); outline.Move(padShapePos)``
+            # where GetOrientation() == file angle (mod 360).  So rotate about
+            # the pad centre alone; the position already went through _wpt.
             ra = math.radians(pad_rot)
             c, s = math.cos(ra), math.sin(ra)
-            world = [_wpt(fp, at[0] + x * c - y * s, at[1] + x * s + y * c) for x, y in pts]
+            world = [(center[0] + x * c + y * s, center[1] + y * c - x * s) for x, y in pts]
             return mpatches.Polygon(world, closed=True)
 
-    center = _wpt(fp, at[0], at[1])
-    if pad_shape in ("circle", "roundrect"):
+    if pad_shape == "circle":
         radius = max(w, h) / 2
         return mpatches.Circle(center, radius)
-    if pad_shape == "oval":
-        return mpatches.FancyBboxPatch(
-            (center[0] - w / 2, center[1] - h / 2),
-            w,
-            h,
-            boxstyle=f"round,pad=0,rounding_size={min(w, h) / 2:.4f}",
-        )
-    # rect / trapezoid / custom shapes: rotate the corners about the center.
+
     ra = math.radians(total_rot)
     c, s = math.cos(ra), math.sin(ra)
-    corners = [
+    local = _pad_outline_points(pad_shape, w, h, pad)
+    world = [(center[0] + x * c + y * s, center[1] + y * c - x * s) for x, y in local]
+    return mpatches.Polygon(world, closed=True)
+
+
+def _pad_outline_points(pad_shape: str, w: float, h: float, pad: list) -> list[tuple[float, float]]:
+    """Outline of a pad in local coordinates (origin at the pad center).
+
+    Mirrors KiCad's PAD::TransformShapeToPolygon: ROUNDRECT is a rounded
+    rectangle with corner radius min(w, h) * ratio; OVAL is a capsule with
+    half-circle caps of radius min(w, h) / 2 along the long axis.
+    """
+    if pad_shape == "roundrect":
+        rratio = 0.25
+        for sub in pad:
+            if isinstance(sub, list) and _sym(sub[0]) == "roundrect_rratio" and len(sub) >= 2:
+                try:
+                    rratio = float(sub[1])
+                except (TypeError, ValueError):
+                    pass
+        return _rounded_rect_points(w, h, min(w, h) * rratio)
+    if pad_shape == "oval":
+        return _oval_points(w, h)
+    # rect / trapezoid / custom (fallback): plain rectangle
+    return [
         (-w / 2, -h / 2),
         (w / 2, -h / 2),
         (w / 2, h / 2),
         (-w / 2, h / 2),
     ]
-    world = [(center[0] + x * c - y * s, center[1] + x * s + y * c) for x, y in corners]
-    return mpatches.Polygon(world, closed=True)
+
+
+def _rounded_rect_points(w: float, h: float, r: float, n: int = 8) -> list[tuple[float, float]]:
+    """Rounded-rectangle outline centered at the origin (corner radius ``r``)."""
+    hw, hh = w / 2, h / 2
+    r = max(0.0, min(r, hw, hh))
+    pts: list[tuple[float, float]] = []
+    # Arc centers at the four corners; each arc sweeps 90 degrees.
+    corners = [
+        (-hw + r, -hh + r, 180.0),
+        (hw - r, -hh + r, 270.0),
+        (hw - r, hh - r, 0.0),
+        (-hw + r, hh - r, 90.0),
+    ]
+    for cx, cy, a0 in corners:
+        for i in range(n + 1):
+            a = math.radians(a0 + 90.0 * i / n)
+            pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+    return pts
+
+
+def _oval_points(w: float, h: float, n: int = 12) -> list[tuple[float, float]]:
+    """Capsule outline (KiCad OVAL) centered at the origin.
+
+    Half-circle caps of radius min(w, h) / 2 placed at the ends of the long
+    axis, connected by straight segments -- exactly KiCad's
+    TransformOvalToPolygon geometry.
+    """
+    dx, dy = w / 2, h / 2
+    half = min(dx, dy)
+    r = half
+    off_x, off_y = dx - half, dy - half
+    pts: list[tuple[float, float]] = []
+    for i in range(n + 1):
+        a = math.radians(-90.0 + 180.0 * i / n)
+        pts.append((off_x + r * math.cos(a), off_y + r * math.sin(a)))
+    for i in range(n + 1):
+        a = math.radians(90.0 + 180.0 * i / n)
+        pts.append((-off_x + r * math.cos(a), -off_y + r * math.sin(a)))
+    return pts
 
 
 def _pad_net(pad: list) -> str | None:
