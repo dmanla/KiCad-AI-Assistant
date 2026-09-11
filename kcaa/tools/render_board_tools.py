@@ -143,7 +143,12 @@ class BoardData:
 
 
 def _build_pad_shape(pad: list, fp: tuple[float, float, float]) -> Any | None:
-    """Build a matplotlib patch for a pad at world coordinates."""
+    """Build a matplotlib patch for a pad at world coordinates.
+
+    The patch is centered on the pad center (KiCad pads rotate about their
+    center; matplotlib's Rectangle angle rotates about its lower-left
+    anchor, so rotated rects are built explicitly from rotated corners).
+    """
     at = _node_coord(pad, "at")
     size = _node_coord(pad, "size")
     if at is None or size is None:
@@ -157,6 +162,7 @@ def _build_pad_shape(pad: list, fp: tuple[float, float, float]) -> Any | None:
             except (TypeError, ValueError):
                 pad_rot = 0.0
     total_rot = pad_rot + fp[2]
+    pad_shape = str(pad[3]) if len(pad) > 3 else ("rect" if len(pad) < 3 else str(pad[2]))
 
     # Custom pads carry (primitives ...) geometry; fall back to the size box.
     primitives = None
@@ -188,7 +194,27 @@ def _build_pad_shape(pad: list, fp: tuple[float, float, float]) -> Any | None:
             return mpatches.Polygon(world, closed=True)
 
     center = _wpt(fp, at[0], at[1])
-    return mpatches.Rectangle((center[0] - w / 2, center[1] - h / 2), w, h, angle=total_rot)
+    if pad_shape in ("circle", "roundrect"):
+        radius = max(w, h) / 2
+        return mpatches.Circle(center, radius)
+    if pad_shape == "oval":
+        return mpatches.FancyBboxPatch(
+            (center[0] - w / 2, center[1] - h / 2),
+            w,
+            h,
+            boxstyle=f"round,pad=0,rounding_size={min(w, h) / 2:.4f}",
+        )
+    # rect / trapezoid / custom shapes: rotate the corners about the center.
+    ra = math.radians(total_rot)
+    c, s = math.cos(ra), math.sin(ra)
+    corners = [
+        (-w / 2, -h / 2),
+        (w / 2, -h / 2),
+        (w / 2, h / 2),
+        (-w / 2, h / 2),
+    ]
+    world = [(center[0] + x * c - y * s, center[1] + x * s + y * c) for x, y in corners]
+    return mpatches.Polygon(world, closed=True)
 
 
 def _pad_net(pad: list) -> str | None:
@@ -672,21 +698,16 @@ def render_board(
 
     # 2. Copper: bottom layer first, then top layers.
     copper_bottom = board.copper_layers[-1] if len(board.copper_layers) > 1 else None
-    for zbase, pred in (
-        (_Z_COPPER_BOTTOM, lambda l: copper_bottom == l),
-        (_Z_COPPER_TOP, lambda l: copper_bottom != l),
-    ):
-        for p in board.pads:
-            if not any(pred(l) for l in p.copper_layers):
-                continue
-            if p.shape is None:
-                continue
-            p.shape.set_facecolor(_layer_color(p.copper_layers[0]))
-            p.shape.set_edgecolor("black")
-            p.shape.set_linewidth(0.3)
-            p.shape.set_alpha(_PAD_ALPHA)
-            p.shape.set_zorder(zbase)
-            ax.add_patch(p.shape)
+    for p in board.pads:
+        if p.shape is None:
+            continue
+        zbase = _Z_COPPER_BOTTOM if (copper_bottom in p.copper_layers) else _Z_COPPER_TOP
+        p.shape.set_facecolor(_layer_color(p.copper_layers[0]))
+        p.shape.set_edgecolor("black")
+        p.shape.set_linewidth(0.3)
+        p.shape.set_alpha(_PAD_ALPHA)
+        p.shape.set_zorder(zbase)
+        ax.add_patch(p.shape)
     for seg in board.tracks:
         layer = seg["layer"]
         z = _Z_COPPER_BOTTOM if copper_bottom == layer else _Z_COPPER_TOP
