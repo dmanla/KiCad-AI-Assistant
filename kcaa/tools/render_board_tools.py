@@ -41,13 +41,25 @@ _SILK_COLOR = "#E8E8E8"
 _COURTYARD_COLOR = "#A9C940"
 _RATSNEST_COLOR = "#1BE41B"
 _PAD_ALPHA = 0.9
-_ZONE_ALPHA = 0.25
+_ZONE_ALPHA = 0.4
+# Fractional zorder offset per copper layer (bottom of stackup first), so
+# every copper element — zone fills, pads, tracks — paints in physical layer
+# order: bottom layers behind, F.Cu on top of the copper group.  Zgroup
+# zorder is _Z_COPPER_BOTTOM + offset; same layer painters rely on draw
+# order (zone -> pad -> track) to stack within a layer.
+_COPPER_STACK_OFFSET = {
+    "B.Cu": 0.0,
+    "In2.Cu": 0.25,
+    "In1.Cu": 0.5,
+    "F.Cu": 0.75,
+}
+# Silkscreen text is semi-transparent so it never fully hides routes/pads
+# underneath; no dark stroke around glyphs.
+_SILK_ALPHA = 0.55
 
 # Render order (bottom to top).
-_Z_ZONE = 1
 _Z_COURTYARD = 2
 _Z_COPPER_BOTTOM = 3
-_Z_COPPER_TOP = 4
 _Z_VIA = 5
 _Z_EDGE = 6
 _Z_SILK = 7
@@ -963,7 +975,9 @@ def render_board(
             alpha=_ZONE_ALPHA,
             edgecolor=color,
             linewidth=0.3,
-            zorder=_Z_ZONE,
+            # Same zorder band as pads/tracks: a zone is copper of its own
+            # layer, so F.Cu pour must sit above B.Cu traces, not below them.
+            zorder=_Z_COPPER_BOTTOM + _COPPER_STACK_OFFSET.get(z["layer"], 0.0),
         )
         if clip is not None:
             patch.set_clip_path(clip)
@@ -976,11 +990,12 @@ def render_board(
         _draw_shape(ax, b, _COURTYARD_COLOR, 0.5, 0.6, _Z_COURTYARD)
 
     # 3. Copper: bottom layer first, then top layers.
-    copper_bottom = board.copper_layers[-1] if len(board.copper_layers) > 1 else None
     for p in board.pads:
         if p.shape is None:
             continue
-        zbase = _Z_COPPER_BOTTOM if (copper_bottom in p.copper_layers) else _Z_COPPER_TOP
+        # Pad paints at the zorder of its topmost copper layer; thru-hole pads
+        # list the full stack so they land on the F.Cu side (nearest viewer).
+        zbase = _Z_COPPER_BOTTOM + _COPPER_STACK_OFFSET.get(p.copper_layers[0], 0.0)
         p.shape.set_facecolor(_layer_color(p.copper_layers[0]))
         p.shape.set_edgecolor("black")
         p.shape.set_linewidth(0.3)
@@ -1002,7 +1017,7 @@ def render_board(
             )
     for seg in board.tracks:
         layer = seg["layer"]
-        z = _Z_COPPER_BOTTOM if copper_bottom == layer else _Z_COPPER_TOP
+        z = _Z_COPPER_BOTTOM + _COPPER_STACK_OFFSET.get(layer, 0.0)
         if seg.get("kind") == "arc":
             pts = _arc_points(seg["start"], seg["mid"], seg["end"])
             xs = [pt[0] for pt in pts]
@@ -1052,11 +1067,11 @@ def render_board(
             rotation=t["rot"],
             fontsize=t["size"] * _PT_PER_MM,
             color=_SILK_COLOR,
+            alpha=_SILK_ALPHA,
             ha="center",
             va="center",
             fontweight="bold" if t["bold"] else "normal",
             zorder=_Z_SILK,
-            path_effects=[pe.withStroke(linewidth=1.0, foreground=_BG_COLOR)],
         )
 
     # 7. Ratsnest on top.
