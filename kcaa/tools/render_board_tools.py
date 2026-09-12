@@ -41,14 +41,17 @@ _SILK_COLOR = "#E8E8E8"
 _COURTYARD_COLOR = "#A9C940"
 _RATSNEST_COLOR = "#1BE41B"
 _PAD_ALPHA = 0.9
+_ZONE_ALPHA = 0.25
 
 # Render order (bottom to top).
-_Z_COURTYARD = 1
-_Z_COPPER_BOTTOM = 2
-_Z_COPPER_TOP = 3
-_Z_EDGE = 4
-_Z_SILK = 5
-_Z_RATSNEST = 6
+_Z_ZONE = 1
+_Z_COURTYARD = 2
+_Z_COPPER_BOTTOM = 3
+_Z_COPPER_TOP = 4
+_Z_VIA = 5
+_Z_EDGE = 6
+_Z_SILK = 7
+_Z_RATSNEST = 8
 
 _PT_PER_MM = 72.0 / 25.4
 
@@ -74,6 +77,92 @@ def _node_coord(node: list, name: str) -> tuple[float, float] | None:
             except (TypeError, ValueError):
                 return None
     return None
+
+
+def _arc_points(start: tuple, mid: tuple, end: tuple, n: int = 32) -> list[tuple[float, float]]:
+    """Sample a KiCad ``gr_arc`` (start/mid/end convention) as points."""
+    x1, y1 = start
+    x2, y2 = mid
+    x3, y3 = end
+    # Circumcenter of the three points.
+    d = 2.0 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2))
+    if abs(d) < 1e-12:
+        return [start, end]
+    ux = (
+        (x1 * x1 + y1 * y1) * (y2 - y3)
+        + (x2 * x2 + y2 * y2) * (y3 - y1)
+        + (x3 * x3 + y3 * y3) * (y1 - y2)
+    ) / d
+    uy = (
+        (x1 * x1 + y1 * y1) * (x3 - x2)
+        + (x2 * x2 + y2 * y2) * (x1 - x3)
+        + (x3 * x3 + y3 * y3) * (x2 - x1)
+    ) / d
+
+    def ang(px, py):
+        return math.atan2(py - uy, px - ux)
+
+    a1 = ang(x1, y1)
+    am = ang(x2, y2)
+    a2 = ang(x3, y3)
+    # Choose direction so the arc passes through mid.
+    span = (a2 - a1) % (2 * math.pi)
+    mid_off = (am - a1) % (2 * math.pi)
+    if mid_off > span or abs(span) < 1e-9:
+        span = span - 2 * math.pi
+    r = math.hypot(x1 - ux, y1 - uy)
+    return [
+        (ux + r * math.cos(a1 + span * k / n), uy + r * math.sin(a1 + span * k / n))
+        for k in range(n + 1)
+    ]
+
+
+def _board_outline(board) -> list[tuple[float, float]] | None:
+    """Closed outline of the board from Edge.Cuts, or None if not closed."""
+    segs: list[list[tuple[float, float]]] = []
+    for e in board.edges:
+        kind = e.get("kind")
+        if kind == "gr_line":
+            segs.append([e["start"], e["end"]])
+        elif kind == "gr_arc":
+            segs.append(_arc_points(e["start"], e["mid"], e["end"]))
+        elif kind in ("gr_rect", "gr_circle", "gr_poly"):
+            # Not a simple segment chain; skip — outline clipping is best effort.
+            return None
+    if not segs:
+        return None
+    pts = list(segs[0])
+    remaining = segs[1:]
+    while remaining:
+        tail = pts[-1]
+        advanced = False
+        for i, seg in enumerate(remaining):
+            if math.hypot(seg[0][0] - tail[0], seg[0][1] - tail[1]) < 1e-6:
+                pts.extend(seg[1:])
+                remaining.pop(i)
+                advanced = True
+                break
+            if math.hypot(seg[-1][0] - tail[0], seg[-1][1] - tail[1]) < 1e-6:
+                pts.extend(reversed(seg[:-1]))
+                remaining.pop(i)
+                advanced = True
+                break
+        if not advanced:
+            return None
+    if math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) > 1e-6:
+        return None
+    return pts
+
+
+def _clip_patch(ax, outline: list[tuple[float, float]]):
+    """A board-outline clip used to keep fills inside the board edge."""
+    import matplotlib.path as mpath
+
+    code = [mpath.Path.MOVETO] + [mpath.Path.LINETO] * (len(outline) - 2) + [mpath.Path.CLOSEPOLY]
+    path = mpath.Path(outline, code)
+    patch = mpatches.PathPatch(path, transform=ax.transData, facecolor="none", edgecolor="none")
+    ax.add_patch(patch)
+    return patch
 
 
 def _is_courtyard(layer: str) -> bool:
@@ -134,6 +223,7 @@ class Pad:
     center: tuple[float, float]
     copper_layers: list[str]
     shape: Any
+    drill: float | None = None  # thru-hole drill diameter, mm
 
 
 @dataclass
@@ -141,6 +231,8 @@ class BoardData:
     copper_layers: list[str] = field(default_factory=list)
     pads: list[Pad] = field(default_factory=list)
     tracks: list[dict] = field(default_factory=list)
+    zones: list[dict] = field(default_factory=list)  # filled copper zone polygons
+    vias: list[dict] = field(default_factory=list)  # via at/size/net
     bodies: list[dict] = field(default_factory=list)  # courtyard/silk shapes
     texts: list[dict] = field(default_factory=list)  # silkscreen labels
     edges: list[dict] = field(default_factory=list)  # Edge.Cuts graphics
@@ -326,6 +418,17 @@ def _pad_copper_layers(pad: list, all_copper: list[str]) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+def _pad_drill(pad: list) -> float | None:
+    """Drill diameter for thru-hole pads (``(drill <d>)``); None for SMD."""
+    for sub in pad:
+        if isinstance(sub, list) and len(sub) >= 2 and _sym(sub[0]) == "drill":
+            try:
+                return float(sub[1])
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def _parse_text(
     node: list, fp: tuple[float, float, float], ref: str = "", value: str = ""
 ) -> dict | None:
@@ -480,6 +583,7 @@ def parse_board(pcb_path: str) -> BoardData:
                             net=_pad_net(sub),
                             center=_wpt(fp_at, at[0], at[1]),
                             copper_layers=_pad_copper_layers(sub, board.copper_layers) or ["F.Cu"],
+                            drill=_pad_drill(sub),
                             shape=_build_pad_shape(sub, fp_at),
                         )
                     )
@@ -530,11 +634,82 @@ def parse_board(pcb_path: str) -> BoardData:
                     board.routed_nets.add(net)
             continue
 
+        if kind == "arc":
+            # Arced route (length-matching meander U-bends): store with the
+            # tracks so it renders as a continuous copper trace.
+            start = _node_coord(node, "start")
+            end = _node_coord(node, "end")
+            mid = _node_coord(node, "mid")
+            layer = _layer_of(node)
+            if start is None or end is None or mid is None or layer is None:
+                continue
+            width = 0.25
+            net = None
+            for sub in node:
+                if isinstance(sub, list) and _sym(sub[0]) == "width":
+                    try:
+                        width = float(sub[1])
+                    except (TypeError, ValueError):
+                        pass
+                if isinstance(sub, list) and _sym(sub[0]) == "net" and len(sub) >= 2:
+                    net = str(sub[1])
+            board.tracks.append(
+                {
+                    "kind": "arc",
+                    "layer": layer,
+                    "start": start,
+                    "mid": mid,
+                    "end": end,
+                    "width": width,
+                }
+            )
+            if net:
+                board.routed_nets.add(net)
+            continue
+
         if kind == "via":
+            at = _node_coord(node, "at")
+            if at is None:
+                continue
+            size = 0.8
+            drill = 0.4
+            net = None
             for sub in node:
                 if isinstance(sub, list) and _sym(sub[0]) == "net" and len(sub) >= 2:
-                    board.routed_nets.add(str(sub[1]))
-                    break
+                    net = str(sub[1])
+                if isinstance(sub, list) and _sym(sub[0]) == "size" and len(sub) >= 2:
+                    try:
+                        size = float(sub[1])
+                    except (TypeError, ValueError):
+                        pass
+                if isinstance(sub, list) and _sym(sub[0]) == "drill" and len(sub) >= 2:
+                    try:
+                        drill = float(sub[1])
+                    except (TypeError, ValueError):
+                        pass
+            if net:
+                board.routed_nets.add(net)
+            board.vias.append({"at": at, "size": size, "drill": drill, "net": net})
+            continue
+
+        if kind == "zone":
+            layer = None
+            pts: list[tuple[float, float]] = []
+            for sub in node:
+                if isinstance(sub, list) and _sym(sub[0]) == "layer" and len(sub) >= 2:
+                    layer = str(sub[1])
+                elif isinstance(sub, list) and _sym(sub[0]) == "polygon":
+                    for pts_node in sub:
+                        if not isinstance(pts_node, list) or _sym(pts_node[0]) != "pts":
+                            continue
+                        for xy in pts_node[1:]:
+                            if isinstance(xy, list) and len(xy) >= 3 and _sym(xy[0]) == "xy":
+                                try:
+                                    pts.append((float(xy[1]), float(xy[2])))
+                                except (TypeError, ValueError):
+                                    pass
+            if layer and len(pts) >= 3:
+                board.zones.append({"layer": layer, "pts": pts})
             continue
 
         if kind in ("gr_line", "gr_rect", "gr_circle", "gr_poly", "gr_arc"):
@@ -774,13 +949,33 @@ def render_board(
     ax.set_aspect("equal")
     ax.axis("off")
 
-    # 1. Courtyards (bottom of visual stack).
+    # 1. Filled copper zones (bottom of visual stack).
+    # Plain semi-transparent layer color, clipped to the board outline so the
+    # fill never spills past the board edge.
+    outline = _board_outline(board)
+    clip = _clip_patch(ax, outline) if outline else None
+    for z in board.zones:
+        color = _layer_color(z["layer"])
+        patch = mpatches.Polygon(
+            z["pts"],
+            closed=True,
+            facecolor=color,
+            alpha=_ZONE_ALPHA,
+            edgecolor=color,
+            linewidth=0.3,
+            zorder=_Z_ZONE,
+        )
+        if clip is not None:
+            patch.set_clip_path(clip)
+        ax.add_patch(patch)
+
+    # 2. Courtyards.
     for b in board.bodies:
         if not _is_courtyard(b["layer"]):
             continue
         _draw_shape(ax, b, _COURTYARD_COLOR, 0.5, 0.6, _Z_COURTYARD)
 
-    # 2. Copper: bottom layer first, then top layers.
+    # 3. Copper: bottom layer first, then top layers.
     copper_bottom = board.copper_layers[-1] if len(board.copper_layers) > 1 else None
     for p in board.pads:
         if p.shape is None:
@@ -792,23 +987,63 @@ def render_board(
         p.shape.set_alpha(_PAD_ALPHA)
         p.shape.set_zorder(zbase)
         ax.add_patch(p.shape)
+        if p.drill and p.drill > 0:
+            # Thru-hole pad: dark drill opening over the copper annulus.
+            # zorder above tracks so a track reaching the hole is clipped
+            # out of the opening instead of drawn across it.
+            ax.add_patch(
+                mpatches.Circle(
+                    p.center,
+                    p.drill / 2,
+                    facecolor=_BG_COLOR,
+                    edgecolor="none",
+                    zorder=_Z_VIA,
+                )
+            )
     for seg in board.tracks:
         layer = seg["layer"]
         z = _Z_COPPER_BOTTOM if copper_bottom == layer else _Z_COPPER_TOP
+        if seg.get("kind") == "arc":
+            pts = _arc_points(seg["start"], seg["mid"], seg["end"])
+            xs = [pt[0] for pt in pts]
+            ys = [pt[1] for pt in pts]
+        else:
+            xs = [seg["start"][0], seg["end"][0]]
+            ys = [seg["start"][1], seg["end"][1]]
         ax.plot(
-            [seg["start"][0], seg["end"][0]],
-            [seg["start"][1], seg["end"][1]],
+            xs,
+            ys,
             color=_layer_color(layer),
             linewidth=max(seg["width"] * _PT_PER_MM, 0.5),
             solid_capstyle="round",
             zorder=z,
         )
 
-    # 3. Board edge (Edge.Cuts).
+    # 4. Vias: copper annulus (layer color) with a dark drill opening,
+    # like any thru-hole copper.  Two discs keep ring/hole proportional at
+    # any dpi — a stroked circle would be swallowed by its own line width.
+    via_edge = _layer_color(board.copper_layers[0]) if board.copper_layers else "#9A9A9A"
+    for v in board.vias:
+        r = v["size"] / 2
+        ax.add_patch(
+            mpatches.Circle(v["at"], r, facecolor=via_edge, edgecolor="none", zorder=_Z_VIA)
+        )
+        if v.get("drill", 0) > 0:
+            ax.add_patch(
+                mpatches.Circle(
+                    v["at"],
+                    v["drill"] / 2,
+                    facecolor=_BG_COLOR,
+                    edgecolor="none",
+                    zorder=_Z_VIA,
+                )
+            )
+
+    # 5. Board edge (Edge.Cuts).
     for e in board.edges:
         _draw_shape(ax, e, _layer_color("Edge.Cuts"), 1.0, 1.0, _Z_EDGE)
 
-    # 4. Silkscreen text (top of the visual stack).
+    # 6. Silkscreen text (top of the visual stack).
     for t in board.texts:
         ax.text(
             t["at"][0],
@@ -824,7 +1059,7 @@ def render_board(
             path_effects=[pe.withStroke(linewidth=1.0, foreground=_BG_COLOR)],
         )
 
-    # 5. Ratsnest on top.
+    # 7. Ratsnest on top.
     for a, b in ratsnest:
         ax.plot(
             [a[0], b[0]],
