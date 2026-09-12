@@ -499,6 +499,7 @@ def _parse_text(
         "rot": rot,
         "size": size,
         "bold": bold,
+        "layer": layer,
     }
 
 
@@ -580,6 +581,13 @@ def parse_board(pcb_path: str) -> BoardData:
                         ref = str(sub[2])
                     elif _sym(sub[1]) == "Value":
                         value = str(sub[2])
+            # Copper layers occupied by this footprint's pads; used to show
+            # its courtyard only on affected layers in single-layer renders.
+            fp_cu_layers: set[str] = set()
+            for sub in node:
+                if isinstance(sub, list) and sub and _sym(sub[0]) == "pad":
+                    fp_cu_layers.update(_pad_copper_layers(sub, board.copper_layers) or ["F.Cu"])
+
             for sub in node:
                 if not isinstance(sub, list) or not sub:
                     continue
@@ -607,6 +615,7 @@ def parse_board(pcb_path: str) -> BoardData:
                     if _is_edge(layer):
                         board.edges.append(entry)
                     elif _is_courtyard(layer) or _is_silk(layer):
+                        entry["fp_layers"] = set(fp_cu_layers)
                         board.bodies.append(entry)
                 elif sk in ("fp_text", "property"):
                     t = _parse_text(sub, fp_at, ref, value)
@@ -903,8 +912,13 @@ def render_board(
     pcb_path: str,
     connect_pads: list[str] | None = None,
     dpi: int | None = None,
+    layer: str | None = None,
 ) -> tuple[list[str], bytes, dict[str, Any]]:
     """Render a board to (report_lines, png_bytes, report_dict).
+
+    ``layer``: optional copper layer name (e.g. ``"F.Cu"``) to render a
+    single-layer image.  Only that layer's zones/pads/tracks are drawn;
+    vias, board edge, courtyards and silkscreen stay as reference.
 
     ``dpi`` scales the PNG resolution directly (line widths and font sizes
     are in mm units, so a higher dpi gives a sharper image of the same
@@ -967,6 +981,8 @@ def render_board(
     outline = _board_outline(board)
     clip = _clip_patch(ax, outline) if outline else None
     for z in board.zones:
+        if layer is not None and z["layer"] != layer:
+            continue
         color = _layer_color(z["layer"])
         patch = mpatches.Polygon(
             z["pts"],
@@ -983,15 +999,19 @@ def render_board(
             patch.set_clip_path(clip)
         ax.add_patch(patch)
 
-    # 2. Courtyards.
+    # 2. Courtyards (only those of footprints touching the requested layer).
     for b in board.bodies:
         if not _is_courtyard(b["layer"]):
+            continue
+        if layer is not None and layer not in b.get("fp_layers", set()):
             continue
         _draw_shape(ax, b, _COURTYARD_COLOR, 0.5, 0.6, _Z_COURTYARD)
 
     # 3. Copper: bottom layer first, then top layers.
     for p in board.pads:
         if p.shape is None:
+            continue
+        if layer is not None and layer not in p.copper_layers:
             continue
         # Pad paints at the zorder of its topmost copper layer; thru-hole pads
         # list the full stack so they land on the F.Cu side (nearest viewer).
@@ -1016,8 +1036,10 @@ def render_board(
                 )
             )
     for seg in board.tracks:
-        layer = seg["layer"]
-        z = _Z_COPPER_BOTTOM + _COPPER_STACK_OFFSET.get(layer, 0.0)
+        slayer = seg["layer"]
+        if layer is not None and slayer != layer:
+            continue
+        z = _Z_COPPER_BOTTOM + _COPPER_STACK_OFFSET.get(slayer, 0.0)
         if seg.get("kind") == "arc":
             pts = _arc_points(seg["start"], seg["mid"], seg["end"])
             xs = [pt[0] for pt in pts]
@@ -1028,7 +1050,7 @@ def render_board(
         ax.plot(
             xs,
             ys,
-            color=_layer_color(layer),
+            color=_layer_color(slayer),
             linewidth=max(seg["width"] * _PT_PER_MM, 0.5),
             solid_capstyle="round",
             zorder=z,
@@ -1058,8 +1080,10 @@ def render_board(
     for e in board.edges:
         _draw_shape(ax, e, _layer_color("Edge.Cuts"), 1.0, 1.0, _Z_EDGE)
 
-    # 6. Silkscreen text (top of the visual stack).
+    # 6. Silkscreen text (top of the visual stack), only on its own side.
     for t in board.texts:
+        if layer is not None and t["layer"].split(".")[0] != layer.split(".")[0]:
+            continue
         ax.text(
             t["at"][0],
             t["at"][1],
@@ -1119,16 +1143,21 @@ def register_render_board_tools(mcp: FastMCP) -> None:
         pcb_path: str,
         connect_pads: list[str] | None = None,
         output_dir: str | None = None,
+        layer: str | None = None,
         ctx: Context | None = None,
     ) -> tuple[str, Image]:
-        """Render a KiCad PCB to a PNG composite image (no kicad-cli needed).
+        """Render a KiCad PCB to a PNG image (no kicad-cli needed).
 
-        The default composite shows courtyards, copper layers (F.Cu red,
-        B.Cu blue), the board edge and silkscreen reference designators on a
-        dark KiCad-style background.  When ``connect_pads`` is provided (e.g.
-        ``["J1.2", "J2.2"]``) the *unrouted* nets joining those pads are
-        drawn as green ratsnest lines so the model can see exactly which pads
-        still need to be connected.
+        By default the composite shows all copper layers stacked in physical
+        order (F.Cu red on top, B.Cu blue below), courtyards, the board edge
+        and reference silkscreen on a dark KiCad-style background.  Pass
+        ``layer`` (e.g. ``"F.Cu"``, ``"In1.Cu"``, ``"B.Cu"``) to render a
+        single layer: only that layer's zones/pads/tracks are drawn, with
+        vias, board edge and courtyards/silkscreen of that side kept as
+        reference.  When ``connect_pads`` is provided (e.g. ``["J1.2",
+        "J2.2"]``) the *unrouted* nets joining those pads are drawn as green
+        ratsnest lines so the model can see exactly which pads still need to
+        be connected.
 
         Args:
             pcb_path: Path to the .kicad_pcb file.
@@ -1136,15 +1165,17 @@ def register_render_board_tools(mcp: FastMCP) -> None:
                 with copper already present are reported as routed; the rest
                 are drawn as green ratsnest.
             output_dir: Optional directory to write the PNG to.
+            layer: Optional copper layer name for a single-layer render.
             ctx: FastMCP context for progress reporting.
 
         Returns:
             A text report plus the PNG image.
         """
-        lines, png, report = render_board(pcb_path, connect_pads=connect_pads)
+        lines, png, report = render_board(pcb_path, connect_pads=connect_pads, layer=layer)
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
             base = os.path.splitext(os.path.basename(pcb_path))[0]
-            with open(os.path.join(output_dir, f"{base}.png"), "wb") as f:
+            suffix = f"-{layer.replace('.', '-')}" if layer else ""
+            with open(os.path.join(output_dir, f"{base}{suffix}.png"), "wb") as f:
                 f.write(png)
         return "\n".join(lines) + f"\nreport={report}", Image(data=png, format="png")
