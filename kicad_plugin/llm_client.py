@@ -257,35 +257,61 @@ _ANTHROPIC_DEFAULT_MAX_TOKENS = 65536
 # schemas the model explicitly loaded. The budget check in _maybe_compact
 # accounts for the loaded subset.
 
-_META_TOOL_NAMES = frozenset({"list_tools", "get_tool_schema"})
+_META_TOOL_NAMES = frozenset({"enable_tool", "disable_tool", "get_tool_schema"})
 
 _TOOL_LOADING_PROMPT = (
     "\n\n## Tool loading protocol\n"
-    "- Only tools whose schema you have loaded are callable.\n"
-    "- Call `list_tools(query)` to discover available tools (loaded tools are marked).\n"
-    "- Call `get_tool_schema(name)` to load a tool before calling it.\n"
-    "- Calls to tools that are not loaded are rejected — load the schema first.\n"
-    "- Do one discovery round (list_tools → get_tool_schema), then execute."
+    "- Only enabled tools are callable; their schemas are included in every request.\n"
+    "- Call `enable_tool(tools=[...])` to activate a batch — schemas appear in the "
+    "next request, in catalog order.\n"
+    "- Call `disable_tool(tools=[...])` to deactivate a batch again.\n"
+    "- `get_tool_schema(name)` previews the schema of a tool that is NOT enabled "
+    "(enabled schemas are already in context).\n"
+    "- Calls to tools that are not enabled are rejected — enable them first.\n"
+    "- Do one enable round per task, then execute."
 )
 
 _META_TOOL_DEFS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
-            "name": "list_tools",
+            "name": "enable_tool",
             "description": (
-                "Discover available KiCad tools. Returns tools whose name or summary matches "
-                "the query, each with a one-line summary and a 'loaded' flag marking whether "
-                "its schema is already available for calling."
+                "Activate one or more tools from the catalog above by exact name. Their full "
+                "schemas will be included in every subsequent request, in catalog order."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Optional search term; empty returns the full catalog.",
+                    "tools": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Exact tool names from the catalog. All must be valid; "
+                        "the batch is rejected atomically otherwise.",
                     }
                 },
+                "required": ["tools"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "disable_tool",
+            "description": (
+                "Deactivate one or more tools by exact name so their schemas stop being sent "
+                "and their calls are rejected again."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tools": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Exact tool names from the catalog.",
+                    }
+                },
+                "required": ["tools"],
             },
         },
     },
@@ -294,15 +320,15 @@ _META_TOOL_DEFS: list[dict[str, Any]] = [
         "function": {
             "name": "get_tool_schema",
             "description": (
-                "Load the full JSON schema for one tool so it becomes callable in the next "
-                "request. Use the exact tool name returned by list_tools."
+                "Preview the full schema of one tool that is currently NOT enabled. Enabled "
+                "tools already have their schema in context and are rejected here."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "tool_name": {
                         "type": "string",
-                        "description": "Exact tool name as returned by list_tools.",
+                        "description": "Exact tool name from the catalog.",
                     }
                 },
                 "required": ["tool_name"],
@@ -1019,19 +1045,19 @@ class LLMClient:
         self._keep_recent_turns: int = getattr(settings, "llm_keep_recent_turns", 4)
         self._max_tokens: int = getattr(settings, "llm_max_tokens", 0)
         self._history: list[dict[str, Any]] = []
-        # On-demand tool loading: full catalog cached per session; only loaded
-        # schemas are sent with each request (LRU-bounded).
+        # Tool schema management: full catalog cached per session; only
+        # explicitly enabled schemas are sent, in stable catalog order, so the
+        # request head stays byte-identical across turns (cache-friendly).
         self._tool_registry: dict[str, dict[str, Any]] | None = None
-        self._loaded_tools: dict[str, dict[str, Any]] = {}
-        self._max_loaded_tools: int = 12
+        self._enabled_tools: set[str] = set()
         # One-shot context-window diagnostics (issue #129).
         self._fixed_overhead_warned: bool = False
         self._budget_warned: bool = False
 
     def reset(self) -> None:
-        """Clear conversation history, loaded-tool set, and one-shot warnings."""
+        """Clear conversation history, enabled-tool set, and one-shot warnings."""
         self._history = []
-        self._loaded_tools.clear()
+        self._enabled_tools.clear()
         self._fixed_overhead_warned = False
         self._budget_warned = False
         # self._tool_registry is kept: the tool catalog is stable per session.
@@ -1635,6 +1661,11 @@ class LLMClient:
         (fixed overhead alone over budget) or the budget is exceeded with
         nothing to compact — instead of silently sending an oversized request.
 
+        Assumes provider-side rendering order system → tools → history: the
+        fixed head (system + catalog + meta-tools) is the byte-identical cache
+        prefix. Keep it stable across turns — never reorder or repopulate the
+        enabled-tools segment mid-session; trimming only ever targets history.
+
         The one exception is ``_prune_rollback_history``: restoring an earlier
         file version invalidates prior tool turns, so those are removed every
         turn for correctness regardless of budget (rare, restore-only).
@@ -1861,87 +1892,113 @@ class LLMClient:
     # On-demand tool loading (issue #129)
     # ------------------------------------------------------------------
 
-    def _build_request_tools(self) -> list[dict[str, Any]]:
-        """Discovery meta-tools plus the currently loaded tool schemas."""
-        return list(_META_TOOL_DEFS) + list(self._loaded_tools.values())
+    def _build_tool_catalog_block(self) -> str:
+        """One-line-per-tool catalog rendered from the cached registry (never hardcoded).
 
-    def _loaded_tools_est_tokens(self) -> int:
-        """Estimated token cost of loaded schemas (chars/4, matching _estimate_tokens)."""
-        return sum(len(json.dumps(d)) for d in self._loaded_tools.values()) // 4
-
-    def _load_tool_schema(self, tool_name: str) -> dict[str, Any] | None:
-        """Load one schema into the LRU-bounded loaded set; return its def or None."""
+        Names and summaries come from the MCP registration payload, so new tools
+        appear automatically. The block is deterministic per session, keeping
+        the request head byte-identical across turns.
+        """
         if self._tool_registry is None:
             self._fetch_tool_definitions()
         registry = self._tool_registry or {}
-        if tool_name not in registry:
-            return None
-        self._loaded_tools.pop(tool_name, None)
-        self._loaded_tools[tool_name] = registry[tool_name]
-        while len(self._loaded_tools) > self._max_loaded_tools:
-            self._loaded_tools.pop(next(iter(self._loaded_tools)))
-        return registry[tool_name]
+        if not registry:
+            return ""
+        lines = []
+        for tname, tdef in registry.items():  # registration order
+            desc = (tdef["function"].get("description") or "").strip().splitlines()
+            summary = (desc[0] if desc else "")[:120]
+            lines.append(f"- {tname}: {summary}")
+        return "\n\n# Available tools\n" + "\n".join(lines)
+
+    def _build_request_tools(self) -> list[dict[str, Any]]:
+        """Meta-tools plus enabled schemas, in stable catalog registration order."""
+        registry = self._tool_registry or {}
+        return list(_META_TOOL_DEFS) + [
+            registry[name] for name in registry if name in self._enabled_tools
+        ]
+
+    def _enabled_tools_est_tokens(self) -> int:
+        """Estimated token cost of enabled schemas (chars/4, matching _estimate_tokens)."""
+        registry = self._tool_registry or {}
+        enabled_chars = sum(
+            len(json.dumps(registry[name])) for name in registry if name in self._enabled_tools
+        )
+        return enabled_chars // 4
 
     def _execute_meta_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
-        """Execute one of the discovery meta-tools locally (never sent to MCP)."""
-        if name == "list_tools":
-            query = (args.get("query") or "").strip().lower()
+        """Execute one of the tool-management meta-tools locally (never sent to MCP)."""
+        if name in ("enable_tool", "disable_tool"):
+            tools = args.get("tools")
+            if not isinstance(tools, list) or not tools:
+                return {
+                    "success": False,
+                    "error": "Pass a non-empty 'tools' list of exact catalog names.",
+                }
+            names = [str(t).strip() for t in tools]
             if self._tool_registry is None:
                 self._fetch_tool_definitions()
             registry = self._tool_registry or {}
-            matches = []
-            for tname, tdef in registry.items():
-                if query and query not in tname.lower():
-                    desc = (tdef["function"].get("description") or "").strip()
-                    if query not in desc.lower():
-                        continue
-                summary = (tdef["function"].get("description") or "").strip().splitlines()
-                matches.append(
-                    {
-                        "name": tname,
-                        "summary": (summary[0] if summary else "")[:200],
-                        "loaded": tname in self._loaded_tools,
+            unknown = [t for t in names if t not in registry]
+            if unknown:  # atomic: one bad name rejects the whole batch
+                return {
+                    "success": False,
+                    "error": (
+                        "Unknown tool(s): "
+                        + ", ".join(map(repr, unknown))
+                        + " — use exact names from the catalog above."
+                    ),
+                    "suggestions": {
+                        t: difflib.get_close_matches(t, registry.keys(), n=5, cutoff=0.4)
+                        for t in unknown
+                    },
+                }
+            if name == "enable_tool":
+                missing_policies = get_missing_tool_policies(names)
+                if missing_policies:  # atomic: nothing activates without policies
+                    return {
+                        "success": False,
+                        "error": (
+                            "Refusing to enable tool(s) with no execution policy: "
+                            + ", ".join(missing_policies)
+                            + " (server/client mismatch)."
+                        ),
                     }
-                )
-            matches.sort(key=lambda m: (not m["loaded"], m["name"]))
+                self._enabled_tools.update(names)
+                return {
+                    "success": True,
+                    "enabled": sorted(names),
+                    "note": "Schemas are included in the next request, in catalog order.",
+                }
+            self._enabled_tools.difference_update(names)
             return {
                 "success": True,
-                "count": len(matches),
-                "tools": matches[:50],
-                "truncated": len(matches) > 50,
-                "note": "Call get_tool_schema(name) to load a tool before calling it.",
+                "disabled": sorted(names),
+                "note": "Calls to disabled tools are rejected until re-enabled.",
             }
+
         if name == "get_tool_schema":
             tool_name = (args.get("tool_name") or "").strip()
-            if tool_name:
-                if tool_name in _META_TOOL_NAMES:
-                    return {
-                        "success": True,
-                        "tool": tool_name,
-                        "loaded": True,
-                        "always_available": True,
-                    }
-                if self._tool_registry is None:
-                    self._fetch_tool_definitions()
-                if tool_name in (self._tool_registry or {}):
-                    if get_missing_tool_policies([tool_name]):
-                        return {
-                            "success": False,
-                            "error": (
-                                f"Tool {tool_name!r} has no execution policy registered — "
-                                "refusing to load it (server/client mismatch)."
-                            ),
-                        }
-                    loaded = self._load_tool_schema(tool_name)
-                    if loaded is not None:
-                        return {
-                            "success": True,
-                            "tool": tool_name,
-                            "loaded": True,
-                            "description": loaded["function"].get("description") or "",
-                            "schema": loaded["function"].get("parameters") or {},
-                        }
+            if self._tool_registry is None:
+                self._fetch_tool_definitions()
             registry = self._tool_registry or {}
+            if tool_name in registry:
+                if tool_name in self._enabled_tools:
+                    return {
+                        "success": False,
+                        "error": (
+                            f"Tool {tool_name!r} is already enabled — its full schema is "
+                            "included in the current context; use it directly."
+                        ),
+                    }
+                tdef = registry[tool_name]
+                return {
+                    "success": True,
+                    "tool": tool_name,
+                    "enabled": False,
+                    "description": tdef["function"].get("description") or "",
+                    "schema": tdef["function"].get("parameters") or {},
+                }
             suggestions = (
                 difflib.get_close_matches(tool_name, registry.keys(), n=5, cutoff=0.4)
                 if tool_name
@@ -1949,9 +2006,7 @@ class LLMClient:
             )
             return {
                 "success": False,
-                "error": (
-                    f"Unknown tool {tool_name!r}. Use list_tools(query) to browse the catalog."
-                ),
+                "error": f"Unknown tool {tool_name!r}. Use exact names from the catalog above.",
                 "suggestions": suggestions,
             }
         return {"success": False, "error": f"Unknown meta tool {name!r}"}
@@ -1963,30 +2018,27 @@ class LLMClient:
         state: _ToolExecutionState,
         on_tool_call: Callable[[str, dict, Any], None] | None,
     ) -> dict[str, Any]:
-        """Dispatch one model tool call: meta tools locally, loaded tools via policy.
+        """Dispatch one model tool call: meta tools locally, enabled tools via policy.
 
-        Calls to real tools whose schema was never loaded are rejected with a
-        clear instruction instead of executing with guessed arguments — crucial
-        for mutation tools.
+        Calls to real tools that were never enabled are rejected with a clear
+        instruction instead of executing with guessed arguments — crucial for
+        mutation tools.
         """
         if name in _META_TOOL_NAMES:
             result = self._execute_meta_tool(name, args)
             self._emit_tool_callback(on_tool_call, name, args, result)
             return result
-        if name not in self._loaded_tools:
+        if name not in self._enabled_tools:
             result = {
                 "success": False,
                 "error": (
-                    f"Tool {name!r} is not loaded — call get_tool_schema({name!r}) first "
-                    f"(or list_tools() to browse)."
+                    f"Tool {name!r} is not enabled — call enable_tool(tools=[{name!r}]) "
+                    "first; its schema will be included in the next request."
                 ),
             }
             self._emit_tool_callback(on_tool_call, name, args, result)
             return result
-        result = self._execute_tool_with_policy(name, args, state, on_tool_call)
-        # Bump recency so LRU eviction prefers tools not used recently.
-        self._loaded_tools[name] = self._loaded_tools.pop(name)
-        return result
+        return self._execute_tool_with_policy(name, args, state, on_tool_call)
 
     def _auto_reload_modified_files(
         self,
@@ -2048,10 +2100,14 @@ class LLMClient:
         if isinstance(user_message, dict) and user_message.get("kind") == "tool_direct":
             return self._run_tool_direct(user_message, on_tool_call)
 
-        system = build_system_prompt(context_block) + _TOOL_LOADING_PROMPT
+        system = (
+            build_system_prompt(context_block)
+            + self._build_tool_catalog_block()
+            + _TOOL_LOADING_PROMPT
+        )
         content = self._build_user_content(user_message, images)
         self._history.append({"role": "user", "content": content})
-        tools_est = self._loaded_tools_est_tokens() + len(json.dumps(_META_TOOL_DEFS)) // 4
+        tools_est = self._enabled_tools_est_tokens() + len(json.dumps(_META_TOOL_DEFS)) // 4
         self._maybe_compact(system, on_compacted, on_warning=on_warning, tools_est_tokens=tools_est)
 
         tools = self._build_request_tools()
@@ -2169,9 +2225,10 @@ class LLMClient:
     def _fetch_tool_definitions(self) -> list[dict[str, Any]]:
         """Fetch the full tool catalog from the MCP server and cache it per session.
 
-        Returns all converted definitions (consumed by the discovery tools);
-        the per-request schema set comes from ``_build_request_tools`` (the
-        loaded subset + meta-tools).
+        Returns all converted definitions (consumed by the catalog block,
+        enable/disable management, and get_tool_schema); the per-request
+        schema set comes from ``_build_request_tools`` (enabled subset +
+        meta-tools, in catalog order).
         """
         if self._tool_registry is not None:
             return list(self._tool_registry.values())

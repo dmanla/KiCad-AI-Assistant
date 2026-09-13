@@ -503,7 +503,7 @@ class TestRunIntegration:
         }
         final_response = {"finish_reason": "stop", "message": {"content": "done"}}
         client._call_llm = MagicMock(side_effect=[tool_response, final_response])
-        client._loaded_tools = {"set_footprint_position": _fake_tool_def("set_footprint_position")}
+        client._enabled_tools = {"set_footprint_position"}
         on_tool_call = MagicMock()
 
         with patch("kicad_plugin.llm_client.call_mcp_tool") as mock_call_tool:
@@ -565,7 +565,7 @@ class TestRunIntegration:
         }
         final_response = {"finish_reason": "stop", "message": {"content": "done"}}
         client._call_llm = MagicMock(side_effect=[tool_response, final_response])
-        client._loaded_tools = {"pcb_route_pad_to_pad": _fake_tool_def("pcb_route_pad_to_pad")}
+        client._enabled_tools = {"pcb_route_pad_to_pad"}
         on_tool_call = MagicMock()
 
         with patch("kicad_plugin.llm_client.call_mcp_tool") as mock_call_tool:
@@ -629,7 +629,7 @@ class TestRunIntegration:
             },
         }
         client._call_llm = MagicMock(side_effect=[tool_response, {"error": "API down"}])
-        client._loaded_tools = {"set_footprint_position": _fake_tool_def("set_footprint_position")}
+        client._enabled_tools = {"set_footprint_position"}
 
         with patch("kicad_plugin.llm_client.call_mcp_tool") as mock_call_tool:
             mock_call_tool.side_effect = [
@@ -671,7 +671,7 @@ class TestRunIntegration:
             },
         }
         client._call_llm = MagicMock(return_value=tool_response)  # never stops calling tools
-        client._loaded_tools = {"set_footprint_position": _fake_tool_def("set_footprint_position")}
+        client._enabled_tools = {"set_footprint_position"}
 
         with patch("kicad_plugin.llm_client.call_mcp_tool") as mock_call_tool:
             mock_call_tool.side_effect = lambda base, name, args: (
@@ -723,10 +723,7 @@ class TestRunIntegration:
             },
         }
         client._call_llm = MagicMock(side_effect=[tool_response])
-        client._loaded_tools = {
-            "set_footprint_position": _fake_tool_def("set_footprint_position"),
-            "flip_footprint": _fake_tool_def("flip_footprint"),
-        }
+        client._enabled_tools = {"set_footprint_position", "flip_footprint"}
 
         with patch("kicad_plugin.llm_client.call_mcp_tool") as mock_call_tool:
             mock_call_tool.side_effect = [
@@ -778,10 +775,7 @@ class TestRunIntegration:
         }
         final_response = {"finish_reason": "stop", "message": {"content": "done"}}
         client._call_llm = MagicMock(side_effect=[tool_response, final_response])
-        client._loaded_tools = {
-            "set_footprint_position": _fake_tool_def("set_footprint_position"),
-            "flip_footprint": _fake_tool_def("flip_footprint"),
-        }
+        client._enabled_tools = {"set_footprint_position", "flip_footprint"}
 
         with patch("kicad_plugin.llm_client.call_mcp_tool") as mock_call_tool:
             mock_call_tool.side_effect = [
@@ -861,10 +855,7 @@ class TestRunIntegration:
         }
         final_response = {"finish_reason": "stop", "message": {"content": "done"}}
         client._call_llm = MagicMock(side_effect=[save_response, mutate_response, final_response])
-        client._loaded_tools = {
-            "save_project_version": _fake_tool_def("save_project_version"),
-            "set_footprint_position": _fake_tool_def("set_footprint_position"),
-        }
+        client._enabled_tools = {"save_project_version", "set_footprint_position"}
 
         with patch("kicad_plugin.llm_client.call_mcp_tool") as mock_call_tool:
             mock_call_tool.side_effect = [
@@ -918,7 +909,7 @@ class TestRunIntegration:
         }
         final_response = {"finish_reason": "stop", "message": {"content": "done"}}
         client._call_llm = MagicMock(side_effect=[tool_response, final_response])
-        client._loaded_tools = {"set_footprint_position": _fake_tool_def("set_footprint_position")}
+        client._enabled_tools = {"set_footprint_position"}
 
         with patch("kicad_plugin.llm_client.call_mcp_tool") as mock_call_tool:
             mock_call_tool.return_value = {"success": False, "error": "disk full"}
@@ -941,14 +932,14 @@ class TestRunIntegration:
             "Failed to save project version before set_footprint_position" in tool_result["error"]
         )
 
-    def test_get_tool_schema_refuses_tools_without_policy(self):
+    def test_enable_tool_refuses_tools_without_policy(self):
         """A tool with no execution policy must never become callable (issue #129)."""
         client = _make_client()
         client._tool_registry = {"unknown_tool": _fake_tool_def("unknown_tool")}
-        result = client._execute_meta_tool("get_tool_schema", {"tool_name": "unknown_tool"})
+        result = client._execute_meta_tool("enable_tool", {"tools": ["unknown_tool"]})
         assert result["success"] is False
         assert "no execution policy" in result["error"]
-        assert "unknown_tool" not in client._loaded_tools
+        assert "unknown_tool" not in client._enabled_tools
 
 
 class TestToolPolicyRegistry:
@@ -2416,9 +2407,13 @@ class TestToolLoading:
     def test_request_tools_meta_only_by_default(self):
         client = _make_client()
         tools = client._build_request_tools()
-        assert [t["function"]["name"] for t in tools] == ["list_tools", "get_tool_schema"]
+        assert [t["function"]["name"] for t in tools] == [
+            "enable_tool",
+            "disable_tool",
+            "get_tool_schema",
+        ]
 
-    def test_get_tool_schema_loads_into_next_request(self):
+    def test_catalog_block_renders_registered_tools(self):
         client = _make_client()
         client._tool_registry = {
             "extract_schematic_netlist": _fake_tool_def(
@@ -2426,31 +2421,83 @@ class TestToolLoading:
             ),
             "get_board_info": _fake_tool_def("get_board_info", "General board information."),
         }
-        result = client._execute_meta_tool(
-            "get_tool_schema", {"tool_name": "extract_schematic_netlist"}
-        )
-        assert result["success"] is True
-        assert result["loaded"] is True
-        names = [t["function"]["name"] for t in client._build_request_tools()]
-        assert names == ["list_tools", "get_tool_schema", "extract_schematic_netlist"]
+        block = client._build_tool_catalog_block()
+        assert "- extract_schematic_netlist: Extract the schematic netlist." in block
+        assert "- get_board_info: General board information." in block
+        assert client._build_tool_catalog_block() == block  # deterministic per session
 
-    def test_list_tools_filters_and_marks_loaded(self):
+    def test_enable_tool_activates_batch_in_registration_order(self):
         client = _make_client()
         client._tool_registry = {
-            "extract_netlist": _fake_tool_def("extract_netlist", "Extract the schematic netlist."),
-            "get_board_info": _fake_tool_def("get_board_info", "General board information."),
-            "add_zone": _fake_tool_def("add_zone", "Add a copper zone."),
+            "extract_schematic_netlist": _fake_tool_def("extract_schematic_netlist"),
+            "get_board_info": _fake_tool_def("get_board_info"),
+            "add_zone": _fake_tool_def("add_zone"),
         }
-        client._load_tool_schema("get_board_info")
-        result = client._execute_meta_tool("list_tools", {"query": "netlist"})
-        assert [t["name"] for t in result["tools"]] == ["extract_netlist"]
-        all_tools = client._execute_meta_tool("list_tools", {"query": ""})
-        flags = {t["name"]: t["loaded"] for t in all_tools["tools"]}
-        assert flags == {
-            "extract_netlist": False,
-            "get_board_info": True,
-            "add_zone": False,
+        result = client._execute_meta_tool("enable_tool", {"tools": ["add_zone", "get_board_info"]})
+        assert result["success"] is True
+        names = [t["function"]["name"] for t in client._build_request_tools()]
+        # registration order wins over enable order
+        assert names == [
+            "enable_tool",
+            "disable_tool",
+            "get_tool_schema",
+            "get_board_info",
+            "add_zone",
+        ]
+
+    def test_disable_tool_removes_from_request(self):
+        client = _make_client()
+        client._tool_registry = {
+            "get_board_info": _fake_tool_def("get_board_info"),
+            "add_zone": _fake_tool_def("add_zone"),
         }
+        client._enabled_tools = {"get_board_info", "add_zone"}
+        client._execute_meta_tool("disable_tool", {"tools": ["get_board_info"]})
+        names = [t["function"]["name"] for t in client._build_request_tools()]
+        assert names == ["enable_tool", "disable_tool", "get_tool_schema", "add_zone"]
+
+    def test_enable_tool_unknown_name_atomically_rejected(self):
+        client = _make_client()
+        client._tool_registry = {
+            "extract_schematic_netlist": _fake_tool_def("extract_schematic_netlist")
+        }
+        result = client._execute_meta_tool(
+            "enable_tool", {"tools": ["extract_schematic_nettlist", "get_board_info"]}
+        )
+        assert result["success"] is False
+        assert "extract_schematic_netlist" in result["suggestions"]["extract_schematic_nettlist"]
+        assert client._enabled_tools == set()  # atomic: nothing partially enabled
+
+    def test_enable_tool_batch_without_policy_atomically_rejected(self):
+        client = _make_client()
+        client._tool_registry = {
+            "get_board_info": _fake_tool_def("get_board_info"),
+            "unknown_tool": _fake_tool_def("unknown_tool"),
+        }
+        result = client._execute_meta_tool(
+            "enable_tool", {"tools": ["get_board_info", "unknown_tool"]}
+        )
+        assert result["success"] is False
+        assert "no execution policy" in result["error"]
+        assert client._enabled_tools == set()
+
+    def test_get_tool_schema_previews_disabled_tool_only(self):
+        client = _make_client()
+        client._tool_registry = {
+            "extract_schematic_netlist": _fake_tool_def("extract_schematic_netlist")
+        }
+        preview = client._execute_meta_tool(
+            "get_tool_schema", {"tool_name": "extract_schematic_netlist"}
+        )
+        assert preview["success"] is True
+        assert preview["enabled"] is False
+        assert client._enabled_tools == set()  # preview does not enable
+        client._enabled_tools = {"extract_schematic_netlist"}
+        blocked = client._execute_meta_tool(
+            "get_tool_schema", {"tool_name": "extract_schematic_netlist"}
+        )
+        assert blocked["success"] is False
+        assert "already enabled" in blocked["error"]
 
     def test_unknown_schema_suggests_close_matches(self):
         client = _make_client()
@@ -2463,28 +2510,22 @@ class TestToolLoading:
         assert result["success"] is False
         assert "extract_schematic_netlist" in result["suggestions"]
 
-    def test_unloaded_real_tool_rejected_without_network(self):
+    def test_unenabled_real_tool_rejected_without_network(self):
         client = _make_client()
         client._tool_registry = {"extract_netlist": _fake_tool_def("extract_netlist")}
         state = llm_client._ToolExecutionState()
         result = client._execute_or_reject_tool("extract_netlist", {}, state, None)
         assert result["success"] is False
-        assert "not loaded" in result["error"]
+        assert "not enabled" in result["error"]
 
     def test_meta_tool_executed_locally(self):
         client = _make_client()
-        client._tool_registry = {}
+        client._tool_registry = {"get_board_info": _fake_tool_def("get_board_info")}
         state = llm_client._ToolExecutionState()
-        result = client._execute_or_reject_tool("list_tools", {"query": ""}, state, None)
+        result = client._execute_or_reject_tool(
+            "enable_tool", {"tools": ["get_board_info"]}, state, None
+        )
         assert result["success"] is True
-
-    def test_lru_cap_evicts_oldest(self):
-        client = _make_client()
-        client._max_loaded_tools = 2
-        client._tool_registry = {f"tool_{i}": _fake_tool_def(f"tool_{i}") for i in range(4)}
-        for i in range(4):
-            client._load_tool_schema(f"tool_{i}")
-        assert list(client._loaded_tools) == ["tool_2", "tool_3"]
 
 
 class TestContextBudgetIncludesTools:
