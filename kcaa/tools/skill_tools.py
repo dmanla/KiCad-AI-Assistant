@@ -133,7 +133,7 @@ def _build_front_matter_blob(name: str, description: str, priority: int | str) -
 def register_skill_tools(mcp: FastMCP) -> None:
     """Register skill discovery, retrieval, and management tools on *mcp*."""
 
-    @mcp.tool(meta={"summary": "List workflow skills"})
+    @mcp.tool()
     def list_skills() -> str:
         """List all available on-demand workflow skills.
 
@@ -147,7 +147,7 @@ def register_skill_tools(mcp: FastMCP) -> None:
         lines = [f"- {s['name']}: {s['description']}" for s in skills]
         return "Available workflow skills:\n" + "\n".join(lines)
 
-    @mcp.tool(meta={"summary": "Load a skill's guidance"})
+    @mcp.tool()
     def get_skill(name: str) -> str:
         """Load detailed workflow guidance for the named skill.
 
@@ -198,7 +198,7 @@ def register_skill_tools(mcp: FastMCP) -> None:
     # Skill management tools (write operations for plugin users)
     # ------------------------------------------------------------------
 
-    @mcp.tool(meta={"summary": "Create a workflow skill"})
+    @mcp.tool()
     def add_skill(name: str, description: str, content: str, priority: int = 50) -> str:
         """Create a new workflow skill.
 
@@ -232,7 +232,7 @@ def register_skill_tools(mcp: FastMCP) -> None:
         log.info("Created skill file %s", filepath)
         return f"Skill '{name}' created at {filepath}"
 
-    @mcp.tool(meta={"summary": "Append content to a skill"})
+    @mcp.tool()
     def append_to_skill(name: str, content: str) -> str:
         """Append content to an existing skill's body.
 
@@ -262,7 +262,7 @@ def register_skill_tools(mcp: FastMCP) -> None:
         log.info("Appended content to skill %s", path)
         return f"Content appended to skill '{name}'."
 
-    @mcp.tool(meta={"summary": "Delete a workflow skill"})
+    @mcp.tool()
     def delete_skill(name: str) -> str:
         """Soft-delete a skill by moving its file to a .deleted/ subdirectory.
 

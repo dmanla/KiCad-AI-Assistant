@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 def register_pcb_placement_tools(mcp: FastMCP) -> None:
     """Register PCB footprint placement tools with the MCP server."""
 
-    @mcp.tool(meta={"summary": "Move or rotate footprints"})
+    @mcp.tool()
     async def set_footprint_position(
         pcb_path: str,
         items: list[dict[str, Any]],
@@ -216,7 +216,7 @@ def register_pcb_placement_tools(mcp: FastMCP) -> None:
             "pcb_path": pcb_path,
         }
 
-    @mcp.tool(meta={"summary": "Flip footprint to opposite side"})
+    @mcp.tool()
     async def flip_footprint(
         pcb_path: str,
         reference: str,
@@ -277,7 +277,7 @@ def register_pcb_placement_tools(mcp: FastMCP) -> None:
             "pcb_path": pcb_path,
         }
 
-    @mcp.tool(meta={"summary": "Align footprints"})
+    @mcp.tool()
     async def align_footprints(
         pcb_path: str,
         references: list[str],
@@ -374,7 +374,7 @@ def register_pcb_placement_tools(mcp: FastMCP) -> None:
             "pcb_path": pcb_path,
         }
 
-    @mcp.tool(meta={"summary": "Distribute footprints evenly"})
+    @mcp.tool()
     async def distribute_footprints(
         pcb_path: str,
         references: list[str],
@@ -460,7 +460,7 @@ def register_pcb_placement_tools(mcp: FastMCP) -> None:
             "pcb_path": pcb_path,
         }
 
-    @mcp.tool(meta={"summary": "Move footprints by a delta"})
+    @mcp.tool()
     async def move_footprints_by_delta(
         pcb_path: str,
         references: list[str],

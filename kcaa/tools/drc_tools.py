@@ -34,7 +34,7 @@ def register_drc_tools(mcp: FastMCP) -> None:
         mcp: The FastMCP server instance
     """
 
-    @mcp.tool(meta={"summary": "Open DRC checker in KiCad"})
+    @mcp.tool()
     async def run_drc_check(project_path: str, ctx: Context | None) -> dict[str, Any]:
         """Open the Design Rules Checker dialog in KiCad.
 
@@ -58,7 +58,7 @@ def register_drc_tools(mcp: FastMCP) -> None:
 
         return await run_drc_via_ipc(files["pcb"], ctx)
 
-    @mcp.tool(meta={"summary": "Get effective design rules"})
+    @mcp.tool()
     def get_effective_design_rules(project_path: str) -> dict[str, Any]:
         """Get all design constraints for a KiCad project.
 
@@ -91,7 +91,7 @@ def register_drc_tools(mcp: FastMCP) -> None:
 
         return get_effective_design_rules_from_file(files["pcb"])
 
-    @mcp.tool(meta={"summary": "Set design rule minimums"})
+    @mcp.tool()
     def set_design_rules(project_path: str, rules: dict[str, float]) -> dict[str, Any]:
         """Update board-level design rule minimums (global hard floor).
 
@@ -113,7 +113,7 @@ def register_drc_tools(mcp: FastMCP) -> None:
 
         return update_design_rules_in_file(project_path, rules)
 
-    @mcp.tool(meta={"summary": "Set net class parameters"})
+    @mcp.tool()
     def set_net_class_rules(
         project_path: str,
         class_name: str,
@@ -152,7 +152,7 @@ def register_drc_tools(mcp: FastMCP) -> None:
 
         return set_net_class_in_pro(project_path, class_name, updates)
 
-    @mcp.tool(meta={"summary": "Assign nets to a class"})
+    @mcp.tool()
     def assign_nets_to_class(
         project_path: str,
         class_name: str,
@@ -186,7 +186,7 @@ def register_drc_tools(mcp: FastMCP) -> None:
 
         return assign_nets_to_class_in_pro(project_path, class_name, nets)
 
-    @mcp.tool(meta={"summary": "Remove nets from a class"})
+    @mcp.tool()
     def remove_nets_from_class(
         project_path: str,
         class_name: str,
@@ -215,7 +215,7 @@ def register_drc_tools(mcp: FastMCP) -> None:
 
         return remove_nets_from_class_in_pro(project_path, class_name, nets)
 
-    @mcp.tool(meta={"summary": "Delete a net class"})
+    @mcp.tool()
     def delete_net_class(project_path: str, class_name: str) -> dict[str, Any]:
         """Delete a net class definition from the project file.
 
@@ -240,7 +240,7 @@ def register_drc_tools(mcp: FastMCP) -> None:
 
         return delete_net_class_from_pro(project_path, class_name)
 
-    @mcp.tool(meta={"summary": "Add a custom design rule"})
+    @mcp.tool()
     def add_custom_rule(
         project_path: str,
         name: str,
@@ -282,7 +282,7 @@ def register_drc_tools(mcp: FastMCP) -> None:
             files["pcb"], name, condition, constraint_type, value, severity
         )
 
-    @mcp.tool(meta={"summary": "Remove a custom design rule"})
+    @mcp.tool()
     def del_custom_rule(project_path: str, rule_name: str) -> dict[str, Any]:
         """Remove a custom design rule by name from the PCB file.
 

@@ -48,7 +48,7 @@ def register_pcb_edit_tools(mcp: FastMCP) -> None:
     # Board outline — query
     # ------------------------------------------------------------------
 
-    @mcp.tool(meta={"summary": "Get board outline items"})
+    @mcp.tool()
     async def get_board_outline(
         pcb_path: str,
         ctx: Context | None,
@@ -84,7 +84,7 @@ def register_pcb_edit_tools(mcp: FastMCP) -> None:
     # Board outline — clear
     # ------------------------------------------------------------------
 
-    @mcp.tool(meta={"summary": "Clear the board outline"})
+    @mcp.tool()
     async def clear_board_outline(
         pcb_path: str,
         ctx: Context | None,
@@ -114,7 +114,7 @@ def register_pcb_edit_tools(mcp: FastMCP) -> None:
     # Board outline — add segment
     # ------------------------------------------------------------------
 
-    @mcp.tool(meta={"summary": "Add outline line segment"})
+    @mcp.tool()
     async def add_board_outline_segment(
         pcb_path: str,
         x1: float,
@@ -159,7 +159,7 @@ def register_pcb_edit_tools(mcp: FastMCP) -> None:
     # Board outline — add arc
     # ------------------------------------------------------------------
 
-    @mcp.tool(meta={"summary": "Add outline arc"})
+    @mcp.tool()
     async def add_board_outline_arc(
         pcb_path: str,
         cx: float,
@@ -219,7 +219,7 @@ def register_pcb_edit_tools(mcp: FastMCP) -> None:
     # Board outline — set rectangular board
     # ------------------------------------------------------------------
 
-    @mcp.tool(meta={"summary": "Set rectangular board outline"})
+    @mcp.tool()
     async def set_board_outline_rect(
         pcb_path: str,
         x: float,
@@ -306,7 +306,7 @@ def register_pcb_edit_tools(mcp: FastMCP) -> None:
             "pcb_path": pcb_path,
         }
 
-    @mcp.tool(meta={"summary": "Update footprint properties"})
+    @mcp.tool()
     async def set_footprint_property(
         pcb_path: str,
         items: list[dict[str, Any]],
@@ -431,7 +431,7 @@ def register_pcb_edit_tools(mcp: FastMCP) -> None:
     # update_pcb_from_schematic
     # ------------------------------------------------------------------
 
-    @mcp.tool(meta={"summary": "Trigger PCB update from schematic"})
+    @mcp.tool()
     async def update_pcb_from_schematic(ctx: Context | None) -> dict[str, Any]:
         """Trigger "Update PCB from Schematic" in the running KiCad instance.
 

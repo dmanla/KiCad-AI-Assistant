@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 def register_version_tools(mcp: FastMCP) -> None:
     """Register project versioning tools on *mcp*."""
 
-    @mcp.tool(meta={"summary": "Save a project version archive"})
+    @mcp.tool()
     async def save_project_version(
         project_file: str,
         keep: int | None = None,
@@ -72,7 +72,7 @@ def register_version_tools(mcp: FastMCP) -> None:
             "files": files,
         }
 
-    @mcp.tool(meta={"summary": "List saved project versions"})
+    @mcp.tool()
     async def list_project_versions(
         project_file: str,
         ctx: Context | None = None,
@@ -97,7 +97,7 @@ def register_version_tools(mcp: FastMCP) -> None:
 
         return {"success": True, "versions": versions, "count": len(versions)}
 
-    @mcp.tool(meta={"summary": "Restore a saved project version"})
+    @mcp.tool()
     async def restore_project_version(
         project_file: str,
         version_id: str,

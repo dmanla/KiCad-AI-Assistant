@@ -283,14 +283,14 @@ def _get_component_type_from_lib_id(lib_id: str) -> str:
 def register_validation_tools(mcp: FastMCP) -> None:
     """Register validation tools with the MCP server."""
 
-    @mcp.tool(name="validate_project_boundaries", meta={"summary": "Validate component boundaries"})
+    @mcp.tool(name="validate_project_boundaries")
     async def validate_project_boundaries_tool(
         project_path: str, ctx: Context = None
     ) -> dict[str, Any]:
         """Validate component boundaries for an entire KiCad project."""
         return await validate_project_boundaries(project_path, ctx)
 
-    @mcp.tool(name="generate_validation_report", meta={"summary": "Generate validation report"})
+    @mcp.tool(name="generate_validation_report")
     async def generate_validation_report_tool(
         project_path: str, output_path: str = None, ctx: Context = None
     ) -> dict[str, Any]:

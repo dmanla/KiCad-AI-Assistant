@@ -463,7 +463,7 @@ class PlacementHelpers:
 def register_placement_helpers(mcp: FastMCP) -> None:
     """Register schematic placement helper tools."""
 
-    @mcp.tool(meta={"summary": "Get schematic sheet info"})
+    @mcp.tool()
     def get_schematic_sheet_info(schematic_path: str) -> dict[str, Any]:
         """Return drawing area, paper size, and grid for a schematic.
 
@@ -510,7 +510,7 @@ def register_placement_helpers(mcp: FastMCP) -> None:
             "axis_convention": "mm, +Y is down (KiCad schematic screen coords)",
         }
 
-    @mcp.tool(meta={"summary": "Find free schematic area"})
+    @mcp.tool()
     def find_free_area(
         schematic_path: str,
         width: float | None = None,

@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 def register_pcb_routing_tools(mcp: FastMCP) -> None:
     """Register PCB routing tools with the MCP server."""
 
-    @mcp.tool(meta={"summary": "Route a track between pads"})
+    @mcp.tool()
     async def pcb_route_pad_to_pad(
         pcb_path: str,
         ref_a: str,
@@ -168,7 +168,7 @@ def register_pcb_routing_tools(mcp: FastMCP) -> None:
             "pcb_path": pcb_path,
         }
 
-    @mcp.tool(meta={"summary": "Add vias to the PCB"})
+    @mcp.tool()
     async def pcb_add_vias(
         pcb_path: str,
         vias: list[dict[str, Any]],
@@ -282,7 +282,7 @@ def register_pcb_routing_tools(mcp: FastMCP) -> None:
             "pcb_path": pcb_path,
         }
 
-    @mcp.tool(meta={"summary": "Delete track segments"})
+    @mcp.tool()
     async def pcb_delete_tracks(
         pcb_path: str,
         segments: list[dict[str, Any]],
@@ -428,7 +428,7 @@ def register_pcb_routing_tools(mcp: FastMCP) -> None:
             "pcb_path": pcb_path,
         }
 
-    @mcp.tool(meta={"summary": "Delete vias by position"})
+    @mcp.tool()
     async def pcb_delete_vias(
         pcb_path: str,
         vias: list[dict[str, Any]],

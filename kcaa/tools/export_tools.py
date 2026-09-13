@@ -21,7 +21,7 @@ def register_export_tools(mcp: FastMCP) -> None:
         mcp: The FastMCP server instance
     """
 
-    @mcp.tool(meta={"summary": "Render PCB thumbnail image"})
+    @mcp.tool()
     async def generate_pcb_thumbnail(project_path: str, ctx: Context | None):
         """Generate a thumbnail image of a KiCad PCB layout using kicad-cli.
 
@@ -99,7 +99,7 @@ def register_export_tools(mcp: FastMCP) -> None:
                 await ctx.info(f"Error: {str(e)}")
             return None
 
-    @mcp.tool(meta={"summary": "Render project PCB thumbnail"})
+    @mcp.tool()
     async def generate_project_thumbnail(project_path: str, ctx: Context | None):
         """Generate a thumbnail of a KiCad project's PCB layout (Alias for generate_pcb_thumbnail)."""
         # This function now just calls the main CLI-based thumbnail generator

@@ -1135,7 +1135,7 @@ def register_sheet_tools(mcp: FastMCP) -> None:
 
     # ---- Read tools ----
 
-    @mcp.tool(meta={"summary": "List schematic sheet symbols"})
+    @mcp.tool()
     async def list_sheet_symbols(
         schematic_path: str,
         ctx: Context | None = None,
@@ -1163,7 +1163,7 @@ def register_sheet_tools(mcp: FastMCP) -> None:
         """
         return _list_sheet_symbols_impl(schematic_path)
 
-    @mcp.tool(meta={"summary": "Get sheet hierarchy"})
+    @mcp.tool()
     async def get_sheet_hierarchy(
         schematic_path: str,
         max_depth: int = 10,
@@ -1197,7 +1197,7 @@ def register_sheet_tools(mcp: FastMCP) -> None:
 
     # ---- Create / Update / Delete tools ----
 
-    @mcp.tool(meta={"summary": "Add a sheet symbol"})
+    @mcp.tool()
     async def add_sheet_symbol(
         schematic_path: str,
         sheet_name: str,
@@ -1306,7 +1306,7 @@ def register_sheet_tools(mcp: FastMCP) -> None:
                 result["note"] = "Position adjusted to nearest free area."
         return result
 
-    @mcp.tool(meta={"summary": "Remove a sheet symbol"})
+    @mcp.tool()
     async def remove_sheet_symbol(
         schematic_path: str,
         sheet_identifier: str,
@@ -1333,7 +1333,7 @@ def register_sheet_tools(mcp: FastMCP) -> None:
             delete_child=delete_child,
         )
 
-    @mcp.tool(meta={"summary": "Update a sheet symbol"})
+    @mcp.tool()
     async def update_sheet_symbol(
         schematic_path: str,
         sheet_identifier: str,
@@ -1468,7 +1468,7 @@ def register_sheet_tools(mcp: FastMCP) -> None:
                 result["note"] = "Position adjusted to nearest free area."
         return result
 
-    @mcp.tool(meta={"summary": "Add a sheet pin"})
+    @mcp.tool()
     async def add_sheet_pin(
         schematic_path: str,
         sheet_identifier: str,
@@ -1491,7 +1491,7 @@ def register_sheet_tools(mcp: FastMCP) -> None:
         """
         return _do_add_sheet_pin(schematic_path, sheet_identifier, pin_name, edge, distance_mm)
 
-    @mcp.tool(meta={"summary": "Remove a sheet pin"})
+    @mcp.tool()
     async def remove_sheet_pin(
         schematic_path: str,
         sheet_identifier: str,

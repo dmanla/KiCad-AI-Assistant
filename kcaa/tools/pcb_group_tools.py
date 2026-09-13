@@ -1058,7 +1058,7 @@ def _rotate_layout(
 def register_pcb_group_tools(mcp: FastMCP) -> None:
     """Register PCB component group management and placement tools."""
 
-    @mcp.tool(meta={"summary": "Assign footprints to a group"})
+    @mcp.tool()
     async def assign_footprints_to_group(
         pcb_path: str,
         references: list[str],
@@ -1114,7 +1114,7 @@ def register_pcb_group_tools(mcp: FastMCP) -> None:
             "pcb_path": pcb_path,
         }
 
-    @mcp.tool(meta={"summary": "List footprint groups"})
+    @mcp.tool()
     async def list_footprint_groups(
         pcb_path: str,
         ctx: Context | None = None,
@@ -1186,7 +1186,7 @@ def register_pcb_group_tools(mcp: FastMCP) -> None:
             "ungrouped_count": ungrouped,
         }
 
-    @mcp.tool(meta={"summary": "Get group details"})
+    @mcp.tool()
     async def get_footprint_group(
         pcb_path: str,
         group_name: str,
@@ -1227,7 +1227,7 @@ def register_pcb_group_tools(mcp: FastMCP) -> None:
             },
         }
 
-    @mcp.tool(meta={"summary": "Score group placement"})
+    @mcp.tool()
     async def score_footprint_group(
         pcb_path: str,
         group_name: str,
@@ -1275,7 +1275,7 @@ def register_pcb_group_tools(mcp: FastMCP) -> None:
             "anchor_ref": anchor["reference"] if anchor else None,
         }
 
-    @mcp.tool(meta={"summary": "Place a footprint group"})
+    @mcp.tool()
     async def place_footprint_group(
         pcb_path: str,
         group_name: str,
@@ -1414,7 +1414,7 @@ def register_pcb_group_tools(mcp: FastMCP) -> None:
             "pcb_path": pcb_path,
         }
 
-    @mcp.tool(meta={"summary": "Move a footprint group"})
+    @mcp.tool()
     async def move_footprint_group(
         pcb_path: str,
         group_name: str,
@@ -1492,7 +1492,7 @@ def register_pcb_group_tools(mcp: FastMCP) -> None:
             "pcb_path": pcb_path,
         }
 
-    @mcp.tool(meta={"summary": "Rotate a footprint group"})
+    @mcp.tool()
     async def rotate_footprint_group(
         pcb_path: str,
         group_name: str,

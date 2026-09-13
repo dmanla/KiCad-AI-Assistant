@@ -19,7 +19,7 @@ def register_netlist_tools(mcp: FastMCP) -> None:
         mcp: The FastMCP server instance
     """
 
-    @mcp.tool(meta={"summary": "Extract project netlist"})
+    @mcp.tool()
     async def extract_project_netlist(project_path: str, ctx: Context | None) -> dict[str, Any]:
         """Extract netlist from a KiCad project's schematic.
 
@@ -79,7 +79,7 @@ def register_netlist_tools(mcp: FastMCP) -> None:
                 ctx.info(f"Error extracting project netlist: {str(e)}")
             return {"success": False, "error": str(e)}
 
-    @mcp.tool(meta={"summary": "Extract schematic netlist"})
+    @mcp.tool()
     async def extract_schematic_netlist(
         schematic_path: str,
         include_wire_topology: bool = False,
@@ -440,7 +440,7 @@ def register_netlist_tools(mcp: FastMCP) -> None:
                 ctx.info(f"Error extracting netlist: {str(e)}")
             return {"success": False, "error": str(e)}
 
-    @mcp.tool(meta={"summary": "Find a component's connections"})
+    @mcp.tool()
     async def find_component_connections(
         project_path: str, component_ref: str, ctx: Context | None
     ) -> dict[str, Any]:
