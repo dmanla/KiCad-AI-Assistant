@@ -222,3 +222,97 @@ def test_status_event_is_not_a_tool_call():
     s = _state()
     _apply(s, {"type": "status", "text": "notice"})
     assert s["tool_calls_made"] is False
+
+
+# ---------------------------------------------------------------------------
+# Reasoning ("thinking") events
+# ---------------------------------------------------------------------------
+
+
+def _apply_reasoning(state, evt):
+    """Apply an event while threading the live reasoning draft through state."""
+    st = apply_stream_event(
+        pending=state["pending"],
+        entries=state["entries"],
+        tool_calls_made=state["tool_calls_made"],
+        turn_had_text=state["turn_had_text"],
+        delta_chars=state["delta_chars"],
+        cancelled=state["cancelled"],
+        evt=evt,
+        timestamp=_ts,
+        pending_reasoning=state.get("pending_reasoning", ""),
+        used_tokens=state.get("used_tokens", 0),
+        limit_tokens=state.get("limit_tokens", 0),
+        input_tokens=state.get("input_tokens", 0),
+        output_tokens=state.get("output_tokens", 0),
+    )
+    state.update(
+        pending=st.pending,
+        pending_reasoning=st.pending_reasoning,
+        used_tokens=st.used_tokens,
+        limit_tokens=st.limit_tokens,
+        input_tokens=st.input_tokens,
+        output_tokens=st.output_tokens,
+    )
+    return st
+
+
+def test_reasoning_chunks_accumulate_and_flag_render():
+    s = _state()
+    st = _apply_reasoning(s, {"type": "reasoning_chunk", "content": "Let me "})
+    assert st.reasoning_changed is True
+    st = _apply_reasoning(s, {"type": "reasoning_chunk", "content": "think."})
+    assert s["pending_reasoning"] == "Let me think."
+    assert st.draft_changed is False  # reasoning never touches the answer draft
+    assert st.entries_changed is False
+    assert s["entries"] == []
+
+
+def test_text_start_resets_previous_reasoning_preview():
+    """A new LLM call drops the previous call's thinking transcript."""
+    s = _state()
+    _apply_reasoning(s, {"type": "reasoning_chunk", "content": "old thoughts"})
+    st = _apply_reasoning(s, {"type": "text_start"})
+    assert s["pending_reasoning"] == ""
+    assert st.reasoning_changed is True
+
+    # A text_start with nothing to clear is a no-op marker.
+    st = _apply_reasoning(s, {"type": "text_start"})
+    assert st.reasoning_changed is False
+
+
+def test_usage_event_sets_tokens_and_context_fill():
+    s = _state()
+    st = _apply_reasoning(
+        s,
+        {
+            "type": "usage",
+            "input_tokens": 1234,
+            "output_tokens": 56,
+            "total_tokens": 1290,
+        },
+    )
+    assert s["input_tokens"] == 1234
+    assert s["output_tokens"] == 56
+    assert s["used_tokens"] == 1234  # reported input is the context fill
+    assert st.meta_changed is True
+    assert st.entries_changed is False
+
+
+def test_context_estimate_event_updates_used_and_limit():
+    s = _state()
+    st = _apply_reasoning(
+        s, {"type": "context_estimate", "used_tokens": 4096, "limit_tokens": 128000}
+    )
+    assert s["used_tokens"] == 4096
+    assert s["limit_tokens"] == 128000
+    assert st.meta_changed is True
+    assert st.draft_changed is False
+
+
+def test_usage_without_input_tokens_keeps_context_fill():
+    """Ollama-style usage may report only output tokens (None input)."""
+    s = _state(used_tokens=999)
+    _apply_reasoning(s, {"type": "usage", "output_tokens": 12})
+    assert s["used_tokens"] == 999  # unchanged: no reliable input count
+    assert s["output_tokens"] == 12

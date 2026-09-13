@@ -266,6 +266,18 @@ def _needs_https_fallback(error: BaseException) -> bool:
     return _NO_HTTPS_MARKER in str(reason) or _is_certificate_verification_error(error)
 
 
+def _openai_rejects_stream_options(body: str) -> bool:
+    """Return whether an HTTP error body blames the ``stream_options`` field.
+
+    Some strict OpenAI-compatible gateways reject unknown request fields
+    instead of ignoring them.  When the rejection explicitly names the usage
+    field we transparently retry the request without token usage reporting,
+    so the chat still works (context usage falls back to the local estimate).
+    """
+    low = (body or "").lower()
+    return "stream_options" in low or "include_usage" in low
+
+
 def _plugin_ssl_context():
     """Build an SSL context from the certifi bundle installed in the plugin venv."""
     try:
@@ -406,6 +418,8 @@ try:
                 tool_blocks = {}
                 stop_reason = "end_turn"
                 current_event = ""
+                input_tokens = 0
+                output_tokens = 0
                 while True:
                     raw = resp.readline()
                     if raw == b"":
@@ -422,7 +436,11 @@ try:
                     except json.JSONDecodeError:
                         continue
                     etype = event_data.get("type", current_event)
-                    if etype == "content_block_start":
+                    if etype == "message_start":
+                        usage = (event_data.get("message") or {}).get("usage") or {}
+                        input_tokens = usage.get("input_tokens") or input_tokens
+                        output_tokens = usage.get("output_tokens") or output_tokens
+                    elif etype == "content_block_start":
                         idx = event_data.get("index", 0)
                         block = event_data.get("content_block", {})
                         btype = block.get("type")
@@ -443,18 +461,32 @@ try:
                             text_blocks[idx] = text_blocks.get(idx, "") + chunk
                             if chunk:
                                 emit("SSE-DATA", {"content": chunk})
+                        elif dtype == "thinking_delta":
+                            think = delta.get("thinking", "")
+                            if think:
+                                emit("SSE-THINK", {"content": think})
                         elif dtype == "input_json_delta":
                             partial = delta.get("partial_json", "")
                             if idx in tool_blocks:
                                 tool_blocks[idx]["input_json"] += partial
                     elif etype == "message_delta":
-                        sr = event_data.get("delta", {}).get("stop_reason")
+                        delta = event_data.get("delta", {})
+                        sr = delta.get("stop_reason")
                         if sr:
                             stop_reason = sr
+                        usage = event_data.get("usage") or {}
+                        if usage.get("output_tokens") is not None:
+                            output_tokens = usage.get("output_tokens") or output_tokens
                     elif etype == "error":
                         err = event_data.get("error", {})
                         emit("SSE-ERROR", {"kind": "stream", "error": err.get("message", str(err))})
                         sys.exit(0)
+                if input_tokens or output_tokens:
+                    emit("SSE-USAGE", {
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "total_tokens": input_tokens + output_tokens,
+                    })
                 full_text = "\n".join(text_blocks[k] for k in sorted(text_blocks))
                 tool_calls = []
                 for k in sorted(tool_blocks):
@@ -495,6 +527,13 @@ try:
                     chunk = json.loads(data_str)
                 except json.JSONDecodeError:
                     continue
+                usage = chunk.get("usage")
+                if usage:
+                    emit("SSE-USAGE", {
+                        "input_tokens": usage.get("prompt_tokens") or 0,
+                        "output_tokens": usage.get("completion_tokens") or 0,
+                        "total_tokens": usage.get("total_tokens") or 0,
+                    })
                 _choices = chunk.get("choices") or []
                 if not _choices:
                     continue
@@ -510,6 +549,7 @@ try:
                 reasoning_part = delta.get("reasoning_content")
                 if reasoning_part:
                     reasoning.append(reasoning_part)
+                    emit("SSE-THINK", {"content": reasoning_part})
                 for tc_delta in delta.get("tool_calls") or []:
                     idx = tc_delta["index"]
                     if idx not in tool_calls:
@@ -691,6 +731,33 @@ def _subprocess_sse_stream(
                     on_stream_event({"type": "text_chunk", "content": content})
                 except Exception as e:  # noqa: BLE001 -- UI callback errors must not kill the turn
                     log.error("Subprocess text delta callback error: %s", e)
+        elif kind == "SSE-THINK" and body:
+            try:
+                think = json.loads(body).get("content") or ""
+            except json.JSONDecodeError:
+                continue
+            if think and on_stream_event is not None:
+                try:
+                    on_stream_event({"type": "reasoning_chunk", "content": think})
+                except Exception as e:  # noqa: BLE001 -- UI callback errors must not kill the turn
+                    log.error("Subprocess reasoning callback error: %s", e)
+        elif kind == "SSE-USAGE" and body:
+            try:
+                usage = json.loads(body)
+            except json.JSONDecodeError:
+                continue
+            if on_stream_event is not None:
+                try:
+                    on_stream_event(
+                        {
+                            "type": "usage",
+                            "input_tokens": usage.get("input_tokens") or 0,
+                            "output_tokens": usage.get("output_tokens") or 0,
+                            "total_tokens": usage.get("total_tokens") or 0,
+                        }
+                    )
+                except Exception as e:  # noqa: BLE001 -- UI callback errors must not kill the turn
+                    log.error("Subprocess usage callback error: %s", e)
         elif kind == "SSE-DONE" and body:
             try:
                 done = json.loads(body)
@@ -946,7 +1013,7 @@ class LLMClient:
     def __init__(self, settings, mcp_base_url: str) -> None:
         self._settings = settings
         self._mcp_base_url = mcp_base_url
-        self._context_tokens: int = getattr(settings, "llm_context_tokens", 128_000)
+        self._context_tokens: int = int(getattr(settings, "llm_context_tokens", 128_000) or 128_000)
         self._compact_threshold: float = getattr(settings, "llm_compact_threshold", 0.70)
         self._compact_target_threshold: float = getattr(
             settings, "llm_compact_target_threshold", 0.49
@@ -975,6 +1042,23 @@ class LLMClient:
     def set_history(self, history: list[dict[str, Any]]) -> None:
         """Replace conversation history when restoring a saved session."""
         self._history = list(history)
+
+    def set_context_tokens(self, tokens: int) -> None:
+        """Set the effective context window (e.g. after auto-detection).
+
+        Also drives the compaction budget and the Ollama ``num_ctx`` option,
+        so detection and the chat request stay consistent.
+        """
+        try:
+            value = int(tokens)
+        except (TypeError, ValueError):
+            return
+        if value > 0:
+            self._context_tokens = value
+
+    def get_context_tokens(self) -> int:
+        """Return the effective context window currently in use."""
+        return self._context_tokens
 
     def _run_tool_direct(
         self,
@@ -1962,6 +2046,21 @@ class LLMClient:
             len(system),
             total_payload,
         )
+        # Surface a live context-window estimate before the request goes out.
+        # The estimate (system + history + tools, chars/4) matches the budget
+        # used by _maybe_compact and is refined by provider-reported usage
+        # once the stream completes.
+        if on_stream_event is not None:
+            try:
+                on_stream_event(
+                    {
+                        "type": "context_estimate",
+                        "used_tokens": total_payload // 4,
+                        "limit_tokens": self._context_tokens,
+                    }
+                )
+            except Exception as e:  # noqa: BLE001 -- UI callback errors must not kill the turn
+                log.debug("context_estimate callback error: %s", e)
         self._validate_history()  # guard against corrupted history before every API call
 
         max_retries = 5
@@ -2085,6 +2184,120 @@ class LLMClient:
                     )
         return blocks
 
+    def _openai_stream_payload(
+        self, messages: list[dict], tools: list[dict], include_usage: bool
+    ) -> bytes:
+        """Build the OpenAI chat-completions streaming request body.
+
+        ``stream_options.include_usage`` asks the provider to append a final
+        usage-only chunk so the UI can show real token counts.  Strict
+        gateways that reject the field are retried without it (see
+        :func:`_openai_rejects_stream_options`).
+        """
+        payload: dict[str, Any] = {
+            "model": self._settings.llm_model,
+            "messages": messages,
+            "tools": tools or None,
+            "stream": True,
+        }
+        if include_usage:
+            payload["stream_options"] = {"include_usage": True}
+        return json.dumps(payload).encode()
+
+    def _parse_openai_stream(self, resp, on_stream_event) -> dict[str, Any]:
+        """Parse one OpenAI-compatible SSE response into an aggregated result.
+
+        Emits ``text_start`` / ``text_chunk`` / ``reasoning_chunk`` /
+        ``usage`` / ``text_end`` lifecycle events as the stream progresses.
+        """
+        text_parts: list[str] = []
+        if on_stream_event is not None:
+            on_stream_event({"type": "text_start"})
+        tool_calls_by_index: dict[int, dict] = {}
+        finish_reason = "stop"
+
+        while True:
+            raw = resp.readline()
+            if raw == b"":
+                break
+            line = raw.decode("utf-8", "replace").rstrip("\r\n")
+            if not line.startswith("data:"):
+                continue
+            data_str = line[5:].strip()
+            if data_str == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
+
+            usage = chunk.get("usage")
+            if isinstance(usage, dict) and on_stream_event is not None:
+                try:
+                    on_stream_event(
+                        {
+                            "type": "usage",
+                            "input_tokens": usage.get("prompt_tokens") or 0,
+                            "output_tokens": usage.get("completion_tokens") or 0,
+                            "total_tokens": usage.get("total_tokens") or 0,
+                        }
+                    )
+                except Exception as e:  # noqa: BLE001 -- UI callback errors must not kill the turn
+                    log.error("Usage callback error in streaming: %s", e)
+
+            _choices = chunk.get("choices") or []
+            if not _choices:
+                continue
+            choice = _choices[0]
+            fr = choice.get("finish_reason")
+            if fr is not None:
+                finish_reason = fr
+
+            delta = choice.get("delta", {})
+            content = delta.get("content")
+            if content:
+                text_parts.append(content)
+                try:
+                    on_stream_event({"type": "text_chunk", "content": content})
+                except Exception as e:
+                    log.error("Text delta callback error in streaming: %s", e)
+
+            reasoning = delta.get("reasoning_content")
+            if reasoning:
+                _current_reasoning.append(reasoning)
+                if on_stream_event is not None:
+                    try:
+                        on_stream_event({"type": "reasoning_chunk", "content": reasoning})
+                    except Exception as e:
+                        log.error("Reasoning callback error in streaming: %s", e)
+
+            for tc_delta in delta.get("tool_calls") or []:
+                idx = tc_delta["index"]
+                if idx not in tool_calls_by_index:
+                    tool_calls_by_index[idx] = {
+                        "id": "",
+                        "type": "function",
+                        "function": {"name": "", "arguments": ""},
+                    }
+                tc = tool_calls_by_index[idx]
+                if tc_delta.get("id"):
+                    tc["id"] += tc_delta["id"]
+                fn = tc_delta.get("function", {})
+                if fn.get("name"):
+                    tc["function"]["name"] += fn["name"]
+                if fn.get("arguments"):
+                    tc["function"]["arguments"] += fn["arguments"]
+
+        tool_calls = [tool_calls_by_index[k] for k in sorted(tool_calls_by_index)]
+        message: dict[str, Any] = {"content": "".join(text_parts)}
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+        if _current_reasoning:
+            message["reasoning_content"] = "".join(_current_reasoning)
+        if on_stream_event is not None:
+            on_stream_event({"type": "text_end"})
+        return {"finish_reason": finish_reason, "message": message}
+
     def _stream_openai(self, system: str, tools: list[dict], on_stream_event) -> dict[str, Any]:
         """Call OpenAI-compatible API with streaming enabled.
 
@@ -2109,104 +2322,62 @@ class LLMClient:
             url = f"{base}/v1/chat/completions"
 
         messages = [{"role": "system", "content": system}] + self._history
-        payload = json.dumps(
-            {
-                "model": self._settings.llm_model,
-                "messages": messages,
-                "tools": tools or None,
-                "stream": True,
-            }
-        ).encode()
         headers = self._openai_headers()
 
+        include_usage = True
         if _in_process_ssl is not False:
-            req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
-            try:
-                with _urlopen_with_plugin_ca_retry(req, timeout=300) as resp:
-                    _in_process_ssl = True
-                    text_parts = []
-                    if on_stream_event is not None:
-                        on_stream_event({"type": "text_start"})
-                    tool_calls_by_index: dict[int, dict] = {}
-                    finish_reason = "stop"
+            for _attempt in range(2):
+                payload = self._openai_stream_payload(messages, tools, include_usage)
+                req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+                try:
+                    with _urlopen_with_plugin_ca_retry(req, timeout=300) as resp:
+                        _in_process_ssl = True
+                        return self._parse_openai_stream(resp, on_stream_event)
 
-                    while True:
-                        raw = resp.readline()
-                        if raw == b"":
-                            break
-                        line = raw.decode("utf-8", "replace").rstrip("\r\n")
-                        if not line.startswith("data:"):
-                            continue
-                        data_str = line[5:].strip()
-                        if data_str == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(data_str)
-                        except json.JSONDecodeError:
-                            continue
-
-                        _choices = chunk.get("choices") or []
-                        if not _choices:
-                            continue
-                        choice = _choices[0]
-                        fr = choice.get("finish_reason")
-                        if fr is not None:
-                            finish_reason = fr
-
-                        delta = choice.get("delta", {})
-                        content = delta.get("content")
-                        if content:
-                            text_parts.append(content)
-                            try:
-                                on_stream_event({"type": "text_chunk", "content": content})
-                            except Exception as e:
-                                log.error("Text delta callback error in streaming: %s", e)
-
-                        reasoning = delta.get("reasoning_content")
-                        if reasoning:
-                            _current_reasoning.append(reasoning)
-
-                        for tc_delta in delta.get("tool_calls") or []:
-                            idx = tc_delta["index"]
-                            if idx not in tool_calls_by_index:
-                                tool_calls_by_index[idx] = {
-                                    "id": "",
-                                    "type": "function",
-                                    "function": {"name": "", "arguments": ""},
-                                }
-                            tc = tool_calls_by_index[idx]
-                            if tc_delta.get("id"):
-                                tc["id"] += tc_delta["id"]
-                            fn = tc_delta.get("function", {})
-                            if fn.get("name"):
-                                tc["function"]["name"] += fn["name"]
-                            if fn.get("arguments"):
-                                tc["function"]["arguments"] += fn["arguments"]
-
-                    tool_calls = [tool_calls_by_index[k] for k in sorted(tool_calls_by_index)]
-                    message: dict[str, Any] = {"content": "".join(text_parts)}
-                    if tool_calls:
-                        message["tool_calls"] = tool_calls
-                    if _current_reasoning:
-                        message["reasoning_content"] = "".join(_current_reasoning)
-                    if on_stream_event is not None:
-                        on_stream_event({"type": "text_end"})
-                    return {"finish_reason": finish_reason, "message": message}
-
-            except urllib.error.HTTPError as e:
-                return {"error": f"HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:200]}"}
-            except urllib.error.URLError as e:
-                if not _needs_https_fallback(e):
-                    return {"error": f"HTTPS request failed: {e}"}
-                _in_process_ssl = False
-                # Fall through to subprocess streaming below.
-            except Exception as e:
-                return {"error": f"Streaming request failed: {e}"}
+                except urllib.error.HTTPError as e:
+                    body = e.read().decode("utf-8", "replace")
+                    if (
+                        include_usage
+                        and e.code in (400, 422)
+                        and _openai_rejects_stream_options(body)
+                    ):
+                        include_usage = False
+                        _current_reasoning = []
+                        log.warning(
+                            "OpenAI endpoint rejected stream_options — retrying without usage reporting"
+                        )
+                        continue
+                    return {"error": f"HTTP {e.code}: {body[:200]}"}
+                except urllib.error.URLError as e:
+                    if not _needs_https_fallback(e):
+                        return {"error": f"HTTPS request failed: {e}"}
+                    _in_process_ssl = False
+                    # Fall through to subprocess streaming below.
+                    break
+                except Exception as e:
+                    return {"error": f"Streaming request failed: {e}"}
 
         # In-process SSL unavailable: stream via the plugin-venv Python subprocess.
-        return _subprocess_sse_stream(
+        payload = self._openai_stream_payload(messages, tools, include_usage)
+        result = _subprocess_sse_stream(
             url, headers, payload, timeout=300, fmt="openai", on_stream_event=on_stream_event
         )
+        if (
+            include_usage
+            and isinstance(result, dict)
+            and str(result.get("error") or "").startswith("HTTP 4")
+        ):
+            if _openai_rejects_stream_options(str(result.get("error"))):
+                payload = self._openai_stream_payload(messages, tools, False)
+                result = _subprocess_sse_stream(
+                    url,
+                    headers,
+                    payload,
+                    timeout=300,
+                    fmt="openai",
+                    on_stream_event=on_stream_event,
+                )
+        return result
 
     def _ollama_messages(self) -> list[dict[str, Any]]:
         """Convert self._history to Ollama /api/chat message format.
@@ -2287,6 +2458,20 @@ class LLMClient:
 
                     if chunk.get("done"):
                         finish_reason = chunk.get("done_reason", "stop")
+                        prompt_tokens = int(chunk.get("prompt_eval_count") or 0)
+                        completion_tokens = int(chunk.get("eval_count") or 0)
+                        if (prompt_tokens or completion_tokens) and on_stream_event is not None:
+                            try:
+                                on_stream_event(
+                                    {
+                                        "type": "usage",
+                                        "input_tokens": prompt_tokens,
+                                        "output_tokens": completion_tokens,
+                                        "total_tokens": prompt_tokens + completion_tokens,
+                                    }
+                                )
+                            except Exception as e:
+                                log.error("Usage callback error in Ollama streaming: %s", e)
                         break
 
                     msg = chunk.get("message", {})
@@ -2297,6 +2482,13 @@ class LLMClient:
                             on_stream_event({"type": "text_chunk", "content": content})
                         except Exception as e:
                             log.error("Text delta callback error in Ollama streaming: %s", e)
+
+                    thinking = msg.get("thinking", "")
+                    if thinking and on_stream_event is not None:
+                        try:
+                            on_stream_event({"type": "reasoning_chunk", "content": thinking})
+                        except Exception as e:
+                            log.error("Reasoning callback error in Ollama streaming: %s", e)
 
                     for tc_delta in msg.get("tool_calls") or []:
                         idx = tc_delta.get("index", 0)
@@ -2384,6 +2576,8 @@ class LLMClient:
                     tool_blocks: dict[int, dict] = {}
                     stop_reason = "end_turn"
                     current_event = ""
+                    input_tokens = 0
+                    output_tokens = 0
 
                     while True:
                         raw = resp.readline()
@@ -2403,7 +2597,12 @@ class LLMClient:
 
                         etype = event_data.get("type", current_event)
 
-                        if etype == "content_block_start":
+                        if etype == "message_start":
+                            usage = (event_data.get("message") or {}).get("usage") or {}
+                            input_tokens = int(usage.get("input_tokens") or input_tokens)
+                            output_tokens = int(usage.get("output_tokens") or output_tokens)
+
+                        elif etype == "content_block_start":
                             idx = event_data.get("index", 0)
                             block = event_data.get("content_block", {})
                             btype = block.get("type")
@@ -2428,6 +2627,15 @@ class LLMClient:
                                         on_stream_event({"type": "text_chunk", "content": chunk})
                                     except Exception as e:
                                         log.error("Anthropic text delta callback error: %s", e)
+                            elif dtype == "thinking_delta":
+                                think = delta.get("thinking", "")
+                                if think and on_stream_event is not None:
+                                    try:
+                                        on_stream_event(
+                                            {"type": "reasoning_chunk", "content": think}
+                                        )
+                                    except Exception as e:
+                                        log.error("Anthropic reasoning callback error: %s", e)
                             elif dtype == "input_json_delta":
                                 partial = delta.get("partial_json", "")
                                 if idx in tool_blocks:
@@ -2438,12 +2646,28 @@ class LLMClient:
                             sr = delta.get("stop_reason")
                             if sr:
                                 stop_reason = sr
+                            usage = event_data.get("usage") or {}
+                            if usage.get("output_tokens") is not None:
+                                output_tokens = int(usage.get("output_tokens") or output_tokens)
 
                         elif etype == "error":
                             err = event_data.get("error", {})
                             return {
                                 "error": f"Anthropic stream error: {err.get('message', str(err))}"
                             }
+
+                    if (input_tokens or output_tokens) and on_stream_event is not None:
+                        try:
+                            on_stream_event(
+                                {
+                                    "type": "usage",
+                                    "input_tokens": input_tokens,
+                                    "output_tokens": output_tokens,
+                                    "total_tokens": input_tokens + output_tokens,
+                                }
+                            )
+                        except Exception as e:
+                            log.error("Anthropic usage callback error: %s", e)
 
                     full_text = "\n".join(text_blocks[k] for k in sorted(text_blocks))
                     tool_calls = []

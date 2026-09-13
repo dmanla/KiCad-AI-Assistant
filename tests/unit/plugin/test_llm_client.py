@@ -119,6 +119,34 @@ class TestSetBaseUrl:
         assert client._mcp_base_url == "http://127.0.0.1:1234"
 
 
+class TestContextTokens:
+    def test_set_context_tokens_updates_effective_window(self):
+        client = _make_client(context_tokens=10_000)
+        client.set_context_tokens(1_000_000)
+        assert client.get_context_tokens() == 1_000_000
+
+    def test_set_context_tokens_ignores_invalid_values(self):
+        client = _make_client(context_tokens=10_000)
+        client.set_context_tokens(0)
+        client.set_context_tokens(-5)
+        client.set_context_tokens("nonsense")
+        assert client.get_context_tokens() == 10_000
+
+    def test_missing_context_setting_falls_back_to_default(self):
+        settings = types.SimpleNamespace(
+            llm_provider="openai",
+            llm_api_key="sk-test",
+            llm_model="gpt-4o",
+            llm_base_url="",
+            llm_context_tokens=None,
+            llm_compact_threshold=0.70,
+            llm_compact_target_threshold=0.49,
+            llm_keep_recent_turns=4,
+        )
+        client = LLMClient(settings, mcp_base_url="http://127.0.0.1:9999")
+        assert client.get_context_tokens() == 128_000
+
+
 class TestDedupToolCalls:
     def test_no_change_when_no_tool_calls(self):
         client = _make_client()
@@ -1233,6 +1261,111 @@ class TestStreaming:
         ]
         assert events[-1]["type"] == "text_end"
 
+    def test_stream_openai_emits_usage_and_reasoning_events(self):
+        """Reasoning deltas become reasoning_chunk events and the final
+        usage chunk (requested via stream_options) becomes a usage event."""
+        client = _make_client()
+        sse_lines = [
+            'data: {"choices":[{"delta":{"reasoning_content":"hmm"},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{"content":"Hi"},"finish_reason":null}]}',
+            'data: {"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":2,"total_tokens":13}}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            "data: [DONE]",
+        ]
+        events = []
+        mock_resp = self._make_sse_response(sse_lines)
+        with (
+            patch.object(llm_client, "_in_process_ssl", True),
+            patch("urllib.request.urlopen", return_value=mock_resp) as m,
+        ):
+            result = client._stream_openai("sys", [], on_stream_event=events.append)
+
+        assert [e["type"] for e in events] == [
+            "text_start",
+            "reasoning_chunk",
+            "text_chunk",
+            "usage",
+            "text_end",
+        ]
+        usage = next(e for e in events if e["type"] == "usage")
+        assert usage["input_tokens"] == 11
+        assert usage["output_tokens"] == 2
+        assert result["message"]["reasoning_content"] == "hmm"
+        # Token usage is requested from OpenAI-compatible endpoints.
+        payload = json.loads(m.call_args[0][0].data)
+        assert payload["stream_options"] == {"include_usage": True}
+
+    def test_stream_openai_retries_without_stream_options_if_rejected(self):
+        """A 400 that names stream_options is retried without usage reporting
+        so strict gateways still stream a normal answer."""
+        client = _make_client()
+        err = urllib.error.HTTPError(
+            "http://x",
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(b'unknown field "stream_options"'),
+        )
+        ok_resp = self._make_sse_response(
+            [
+                'data: {"choices":[{"delta":{"content":"Hi"},"finish_reason":"stop"}]}',
+                "data: [DONE]",
+            ]
+        )
+        payloads = []
+
+        def _fake_urlopen(req, timeout=0):
+            payloads.append(json.loads(req.data))
+            if "stream_options" in payloads[-1]:
+                raise err
+            return ok_resp
+
+        with (
+            patch.object(llm_client, "_in_process_ssl", True),
+            patch("urllib.request.urlopen", side_effect=_fake_urlopen),
+        ):
+            result = client._stream_openai("sys", [], on_stream_event=lambda evt: None)
+
+        assert result["message"]["content"] == "Hi"
+        assert len(payloads) == 2
+        assert "stream_options" in payloads[0]
+        assert "stream_options" not in payloads[1]
+
+    def test_stream_anthropic_emits_usage_and_reasoning(self):
+        client = _make_client()
+        client._settings.llm_provider = "anthropic"
+        sse_lines = [
+            "event: message_start",
+            'data: {"type":"message_start","message":{"usage":{"input_tokens":21,"output_tokens":0}}}',
+            "event: content_block_delta",
+            'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"pondering"}}',
+            "event: content_block_start",
+            'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+            "event: content_block_delta",
+            'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}',
+            "event: message_delta",
+            'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}',
+        ]
+        events = []
+        mock_resp = self._make_sse_response(sse_lines)
+        with (
+            patch.object(llm_client, "_in_process_ssl", True),
+            patch("urllib.request.urlopen", return_value=mock_resp),
+        ):
+            result = client._stream_anthropic("sys", [], on_stream_event=events.append)
+
+        assert [e["type"] for e in events] == [
+            "text_start",
+            "reasoning_chunk",
+            "text_chunk",
+            "usage",
+            "text_end",
+        ]
+        usage = next(e for e in events if e["type"] == "usage")
+        assert usage["input_tokens"] == 21
+        assert usage["output_tokens"] == 5
+        assert result["message"]["content"] == "Hi"
+
     def test_stream_openai_skips_empty_choices_chunk(self):
         """Mid-stream empty choices chunks (usage/keepalive) must not abort
         the parse — tool-call deltas that follow must still be captured."""
@@ -1601,6 +1734,45 @@ class TestSubprocessSSEStream:
         args = json.loads(tc[0]["function"]["arguments"])
         assert args == {"path": "sch.kicad_sch"}
         assert result["finish_reason"] == "tool_calls"
+
+    def test_openai_relay_usage_and_reasoning(self):
+        """The venv subprocess relay carries SSE-THINK/SSE-USAGE back as
+        reasoning_chunk/usage events (the SSL-less embedded Python path)."""
+        lines = [
+            'data: {"choices":[{"delta":{"reasoning_content":"why"},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            'data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}',
+            "data: [DONE]",
+        ]
+        server = _SSETestServer(lines)
+        events = []
+        try:
+            with (
+                patch(
+                    "kicad_plugin.llm_client._resolve_plugin_python",
+                    return_value=sys.executable,
+                ),
+                patch(
+                    "kicad_plugin.llm_client._subprocess_env",
+                    return_value={"PATH": os.environ.get("PATH", "")},
+                ),
+            ):
+                result = _subprocess_sse_stream(
+                    url=server.url,
+                    headers={"Content-Type": "application/json"},
+                    payload=b'{"model":"t","stream":true}',
+                    timeout=30,
+                    fmt="openai",
+                    on_stream_event=events.append,
+                )
+        finally:
+            server.shutdown()
+
+        assert "error" not in result
+        assert [e["type"] for e in events] == ["text_start", "reasoning_chunk", "usage", "text_end"]
+        usage = events[2]
+        assert usage["input_tokens"] == 7
+        assert usage["output_tokens"] == 3
 
     def test_http_error_surfaces_status_and_body(self):
         result, chunks = self._relay([], status=429, body=b"rate limited", fmt="openai")

@@ -144,6 +144,42 @@ function _shouldScrollBottom() {
     return (sh - ih - sy) < 80;
 }
 
+// Live model "thinking" preview.  The reasoning text is plain text (never
+// HTML) so an untrusted model transcript cannot inject markup; the element
+// uses white-space:pre-wrap to preserve line breaks.
+window._updateReasoning = function(text, streaming) {
+    var wrapper = document.getElementById('reasoning-wrapper');
+    var body = document.getElementById('reasoning-text');
+    if (!wrapper || !body) return 'error:no reasoning div';
+    if (!text) {
+        wrapper.style.display = 'none';
+        wrapper.open = false;
+        body.textContent = '';
+        return 'ok:empty';
+    }
+    body.textContent = text;
+    wrapper.style.display = '';
+    var summary = wrapper.querySelector('summary');
+    if (summary) {
+        summary.textContent = streaming ? '\uD83D\uDCAD Thinking\u2026' : '\uD83D\uDCAD Thought process';
+    }
+    // Auto-open while thinking so the user sees progress; collapse once the
+    // model has moved on to its answer.
+    wrapper.open = !!streaming;
+    return 'ok';
+};
+
+window._clearReasoning = function() {
+    var wrapper = document.getElementById('reasoning-wrapper');
+    var body = document.getElementById('reasoning-text');
+    if (body) body.textContent = '';
+    if (wrapper) {
+        wrapper.style.display = 'none';
+        wrapper.open = false;
+    }
+    return 'ok';
+};
+
 window._updateConversation = function(entriesJson, scrollBehavior) {
     try {
         var conv = document.getElementById('conversation');
@@ -158,6 +194,7 @@ window._updateConversation = function(entriesJson, scrollBehavior) {
         var sw = document.getElementById('stream-wrapper');
         if (sw) sw.style.display = 'none';
         document.getElementById('pending-ai-text').innerHTML = '';
+        if (window._clearReasoning) window._clearReasoning();
         if (scrollBehavior === 'bottom') {
             window.scrollTo(0, document.body ? document.body.scrollHeight : 0);
         }
@@ -176,6 +213,7 @@ window._appendEntry = function(entryJson, scrollBehavior) {
         var sw = document.getElementById('stream-wrapper');
         if (sw) sw.style.display = 'none';
         document.getElementById('pending-ai-text').innerHTML = '';
+        if (window._clearReasoning) window._clearReasoning();
         if (scrollBehavior === 'bottom') {
             window.scrollTo(0, document.body ? document.body.scrollHeight : 0);
         }
@@ -201,6 +239,7 @@ window._clearConversation = function() {
     var sw = document.getElementById('stream-wrapper');
     if (sw) sw.style.display = 'none';
     document.getElementById('pending-ai-text').innerHTML = '';
+    if (window._clearReasoning) window._clearReasoning();
     window.scrollTo(0, 0);
 };
 

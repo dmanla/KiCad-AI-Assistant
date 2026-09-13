@@ -72,6 +72,48 @@ The engineer does not see this context payload; it is added automatically.
 - The engineer clicks it to trigger a KiCad file reload
 - The plugin does **not** auto-reload without explicit confirmation because KiCad may have unsaved in-memory changes
 
+### 3.6 Live status bar (model, context, tokens, phase)
+
+A compact native status bar sits above the conversation and updates in real time:
+
+- **Model** — the active provider and model name (for example, `openai · gpt-4o`).
+- **Phase** — a colored, animated indicator with elapsed seconds:
+  `Waiting for model`, `Thinking`, `Responding`, `Running tool`, or `Ready`.
+  The dots and timer advance while a turn is in flight, so a stalled request is
+  visually obvious.
+- **Context window** — a color-coded meter plus `used / limit (percent)`. The
+  fill turns amber as it approaches the compaction threshold and red near the
+  limit. The value is the provider-reported input token count when available,
+  and otherwise the local estimate for the next request (system prompt plus
+  history plus tool definitions).
+- **Session tokens** — cumulative input and output tokens for the session
+  (`↑ in · ↓ out`), with an estimated `+N` count for the response currently
+  streaming.
+
+When the model emits reasoning ("thinking") text, the panel shows a collapsible
+"Thinking…" block that streams the transcript live and collapses to "Thought
+process" once the model starts its answer. Reasoning text is ephemeral: it is
+never saved to the session file.
+
+#### Context-window auto-detection
+
+The context-window size is detected from the provider whenever the provider or
+model changes, so the meter reflects the model's real capacity:
+
+- **Anthropic** — `GET /v1/models/{model}` returns `max_input_tokens`.
+- **Ollama** — `POST /api/show` returns `model_info.<arch>.context_length`.
+- **Kilo gateway, OpenRouter, LM Studio, vLLM, and other OpenAI-compatible
+  servers** — the model list endpoint returns `context_length` (or
+  `max_context_length` / `max_model_len` / `context_window`).
+- **OpenAI** — its `/v1/models` endpoint does not report a context window, so a
+  small built-in catalog supplies values for well-known model families.
+
+Detection runs off the UI thread and never blocks or fails a chat turn. If the
+provider does not report a size, the plugin keeps the configured value. The
+settings dialog has an **Auto-detect context window** checkbox; unchecking it
+uses the **Context window (tokens)** value verbatim, and that value also acts as
+the fallback when detection is unavailable.
+
 ---
 
 ## 4. Tool Log
