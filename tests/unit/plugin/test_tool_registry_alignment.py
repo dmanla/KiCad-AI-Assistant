@@ -7,6 +7,7 @@ that occurs when the LLM client calls a tool not covered by the
 plugin's explicit policy registry.
 """
 
+import ast
 from pathlib import Path
 import re
 
@@ -139,4 +140,53 @@ def test_registry_has_no_stale_entries() -> None:
     assert not stale, (
         f"{len(stale)} tool(s) in tool_registry.py TOOL_POLICIES have "
         f"no corresponding @mcp.tool() in kcaa/tools/:\n  " + "\n  ".join(stale)
+    )
+
+
+def _decorated_tool_functions() -> dict[str, str]:
+    """Map every ``@mcp.tool(...)``-decorated function name to its docstring
+    first line (cleaned). Uses ast so indentation/annotations are handled
+    reliably.
+    """
+    first_lines: dict[str, str] = {}
+    for py_file in sorted(_TOOLS_DIR.rglob("*.py")):
+        tree = ast.parse(py_file.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            decorated = any(
+                isinstance(d, ast.Call)
+                and isinstance(d.func, ast.Attribute)
+                and isinstance(d.func.value, ast.Name)
+                and d.func.value.id == "mcp"
+                and d.func.attr == "tool"
+                for d in node.decorator_list
+            )
+            if not decorated:
+                continue
+            doc = ast.get_docstring(node, clean=False) or ""
+            first = (doc.splitlines() or [""])[0].strip()
+            first_lines[node.name] = first
+    return first_lines
+
+
+def test_tools_have_valid_docstring_first_line() -> None:
+    """Every ""@mcp.tool()"" tool must have a non-empty, <= 100 char first line.
+
+    The prompt catalog renders the first docstring line as the tool summary
+    (issue #129); a blank first line would produce ``- name: `` and an
+    oversized one would be truncated mid-word in the catalog block.
+    """
+    first_lines = _decorated_tool_functions()
+    assert first_lines, "no @mcp.tool() tools found — scan is broken"
+
+    problems: list[str] = []
+    for name, first in sorted(first_lines.items()):
+        if not first:
+            problems.append(f"{name}: empty docstring first line")
+        elif len(first) > 100:
+            problems.append(f"{name}: docstring first line too long ({len(first)} chars)")
+    assert not problems, (
+        "Every tool's docstring first line must be non-empty and <= 100 chars "
+        "(it is rendered as the tool summary in the prompt catalog):\n  " + "\n  ".join(problems)
     )
