@@ -2420,10 +2420,17 @@ class TestToolLoading:
                 "extract_schematic_netlist", "Extract the schematic netlist."
             ),
             "get_board_info": _fake_tool_def("get_board_info", "General board information."),
+            "add_zone": _fake_tool_def(
+                "add_zone",
+                "Add a copper zone to the PCB. Supports thermal relief, clearance tuning.",
+            ),
         }
         block = client._build_tool_catalog_block()
         assert "- extract_schematic_netlist: Extract the schematic netlist." in block
         assert "- get_board_info: General board information." in block
+        # only the first sentence of the registered description is rendered
+        assert "- add_zone: Add a copper zone to the PCB." in block
+        assert "thermal relief" not in block
         assert client._build_tool_catalog_block() == block  # deterministic per session
 
     def test_enable_tool_activates_batch_in_registration_order(self):

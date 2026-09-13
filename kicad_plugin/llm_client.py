@@ -264,7 +264,11 @@ _TOOL_LOADING_PROMPT = (
     "- Only enabled tools are callable; their schemas are included in every request.\n"
     "- Call `enable_tool(tools=[...])` to activate a batch — schemas appear in the "
     "next request, in catalog order.\n"
-    "- Call `disable_tool(tools=[...])` to deactivate a batch again.\n"
+    "- Plan ahead: enable every tool the task may need in ONE batch up front. Avoid "
+    "per-step toggling — each enable/disable rewrites the tools segment and loses "
+    "the provider cache on it.\n"
+    "- Keep tools enabled for the whole task; call `disable_tool` only once a tool is "
+    "clearly no longer needed.\n"
     "- `get_tool_schema(name)` previews the schema of a tool that is NOT enabled "
     "(enabled schemas are already in context).\n"
     "- Calls to tools that are not enabled are rejected — enable them first.\n"
@@ -1907,8 +1911,10 @@ class LLMClient:
         lines = []
         for tname, tdef in registry.items():  # registration order
             desc = (tdef["function"].get("description") or "").strip().splitlines()
-            summary = (desc[0] if desc else "")[:120]
-            lines.append(f"- {tname}: {summary}")
+            first_line = desc[0] if desc else ""
+            # Keep the catalog compact: first sentence only, <= 100 chars.
+            summary = first_line.split(".", 1)[0] + "." if "." in first_line else first_line
+            lines.append(f"- {tname}: {summary[:100]}")
         return "\n\n# Available tools\n" + "\n".join(lines)
 
     def _build_request_tools(self) -> list[dict[str, Any]]:
