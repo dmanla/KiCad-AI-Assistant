@@ -72,6 +72,29 @@ The engineer does not see this context payload; it is added automatically.
 - The engineer clicks it to trigger a KiCad file reload
 - The plugin does **not** auto-reload without explicit confirmation because KiCad may have unsaved in-memory changes
 
+### 3.6 Live status bar (model, context, tokens, phase)
+
+A compact native status bar sits above the conversation and updates in real time:
+
+- **Model** — the active provider and model name (for example, `openai · gpt-4o`).
+- **Phase** — a colored, animated indicator with elapsed seconds:
+  `Waiting for model`, `Thinking`, `Responding`, `Running tool`, or `Ready`.
+  The dots and timer advance while a turn is in flight, so a stalled request is
+  visually obvious.
+- **Context window** — a color-coded meter plus `used / limit (percent)`. The
+  fill turns amber as it approaches the compaction threshold and red near the
+  limit. The value is the provider-reported input token count when available,
+  and otherwise the local estimate for the next request (system prompt plus
+  history plus tool definitions).
+- **Session tokens** — cumulative input and output tokens for the session
+  (`↑ in · ↓ out`), with an estimated `+N` count for the response currently
+  streaming.
+
+When the model emits reasoning ("thinking") text, the panel shows a collapsible
+"Thinking…" block that streams the transcript live and collapses to "Thought
+process" once the model starts its answer. Reasoning text is ephemeral: it is
+never saved to the session file.
+
 ---
 
 ## 4. Tool Log

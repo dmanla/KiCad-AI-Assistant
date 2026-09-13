@@ -24,9 +24,14 @@ from dataclasses import dataclass
 from typing import Any
 
 # Event payloads, produced in this order by the background thread:
-#   {"type": "text_start"}                              ordering marker (no-op)
+#   {"type": "text_start"}                              ordering marker (new LLM call) -> reset reasoning
 #   {"type": "text_chunk", "content": str}              streamed content
 #   {"type": "text_end"}                                response text complete -> finalise draft
+#   {"type": "reasoning_chunk", "content": str}         model "thinking" delta (live, ephemeral)
+#   {"type": "usage", "input_tokens": int, "output_tokens": int, "total_tokens": int}
+#                                                       provider-reported token usage for one LLM call
+#   {"type": "context_estimate", "used_tokens": int, "limit_tokens": int}
+#                                                       local context-window estimate for one LLM call
 #   {"type": "tool_call", "name": str, "args": dict, "result": Any}
 #   {"type": "turn_end", "reply": str}                  turn complete (takes over _on_reply)
 #   {"type": "status", "text": str, "color_hex": str}   transient system notice (e.g. compacted history)
@@ -50,9 +55,19 @@ class TurnState:
     tool_calls_made: bool = False
     turn_had_text: bool = False
     delta_chars: int = 0
+    # Live model "thinking" text for the active LLM call (ephemeral, never
+    # persisted); reset by the ``text_start`` marker of the next call.
+    pending_reasoning: str = ""
+    # Token/context counters surfaced by the panel's meta bar.
+    used_tokens: int = 0
+    limit_tokens: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
     # Mutation flags for the caller's single merged render pass.
     draft_changed: bool = False
     entries_changed: bool = False
+    reasoning_changed: bool = False
+    meta_changed: bool = False
 
 
 def apply_stream_event(
@@ -65,6 +80,11 @@ def apply_stream_event(
     cancelled: bool,
     evt: dict[str, Any],
     timestamp: Callable[[], str],
+    pending_reasoning: str = "",
+    used_tokens: int = 0,
+    limit_tokens: int = 0,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
 ) -> TurnState:
     """Apply one lifecycle event to the turn state (pure; ``entries`` mutated).
 
@@ -80,11 +100,21 @@ def apply_stream_event(
         tool_calls_made=tool_calls_made,
         turn_had_text=turn_had_text,
         delta_chars=delta_chars,
+        pending_reasoning=pending_reasoning,
+        used_tokens=used_tokens,
+        limit_tokens=limit_tokens,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
     )
 
     etype = evt.get("type")
     if etype == "text_start":
-        return base  # ordering marker only
+        # A new LLM call begins: drop the previous call's reasoning preview
+        # (it is done) so the meta bar/thinking block reflects the live call.
+        if pending_reasoning:
+            base.pending_reasoning = ""
+            base.reasoning_changed = True
+        return base  # otherwise an ordering marker only
 
     if etype == "text_chunk":
         if cancelled:
@@ -94,6 +124,32 @@ def apply_stream_event(
         base.turn_had_text = True
         base.delta_chars = delta_chars + len(content)
         base.draft_changed = True
+        return base
+
+    if etype == "reasoning_chunk":
+        content = evt.get("content") or ""
+        if content:
+            base.pending_reasoning = pending_reasoning + content
+            base.reasoning_changed = True
+        return base
+
+    if etype == "usage":
+        base.input_tokens = int(evt.get("input_tokens") or 0)
+        base.output_tokens = int(evt.get("output_tokens") or 0)
+        # Provider-reported input tokens are the most accurate context fill.
+        if base.input_tokens > 0:
+            base.used_tokens = base.input_tokens
+        if evt.get("limit_tokens"):
+            base.limit_tokens = int(evt["limit_tokens"])
+        base.meta_changed = True
+        return base
+
+    if etype == "context_estimate":
+        if evt.get("used_tokens") is not None:
+            base.used_tokens = int(evt.get("used_tokens") or 0)
+        if evt.get("limit_tokens"):
+            base.limit_tokens = int(evt["limit_tokens"])
+        base.meta_changed = True
         return base
 
     if etype == "text_end":

@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import threading
+import time
 from typing import Any
 
 from .stream_events import apply_stream_event, make_ai_entry
@@ -173,7 +174,33 @@ if _WX_AVAILABLE:
             self._conv_version: int = 0
             self._saved_conv_version: int = 0
 
+            # ---- Meta bar state: model / context window / tokens / phase ----
+            # Current context-window fill (provider-reported input tokens when
+            # available, otherwise the local chars/4 estimate refreshed per
+            # LLM call) and the configured window size.
+            self._ctx_used_tokens: int = 0
+            self._ctx_limit_tokens: int = int(getattr(settings, "llm_context_tokens", 128_000) or 0)
+            # Cumulative session tokens (every LLM call's reported usage).
+            self._session_in_tokens: int = 0
+            self._session_out_tokens: int = 0
+            # Most recent LLM call's reported usage (for the live label).
+            self._last_in_tokens: int = 0
+            self._last_out_tokens: int = 0
+            # Live streamed-character count for the active turn (used for the
+            # in-flight output-token estimate and finalised by _finish_turn).
+            self._stream_delta_chars: int = 0
+            # Model "thinking" text for the active LLM call (ephemeral).
+            self._pending_reasoning_text: str = ""
+            # Live model phase: idle / waiting / thinking / responding / tool.
+            self._model_phase: str = "idle"
+            self._turn_started_at: float = 0.0
+            self._phase_tick: int = 0
+            # Throttle for pushing the (growing) reasoning transcript to the
+            # shell: at most ~5 updates/s, plus an immediate final/clear push.
+            self._last_reasoning_push: float = 0.0
+
             self._build_ui()
+            self._update_meta_bar()
             self._start_server()
             self.Centre()
 
@@ -258,6 +285,13 @@ if _WX_AVAILABLE:
                 "</head>"
                 "<body>"
                 "<div id='conversation'></div>"
+                "<details id='reasoning-wrapper' style='display:none;margin:4px 8px'>"
+                "<summary style='cursor:pointer;color:#5B4B8A;font-weight:600;user-select:none'>"
+                "\U0001f4ad Thinking\u2026</summary>"
+                "<div id='reasoning-text' style='white-space:pre-wrap;font-size:10pt;color:#555;"
+                "background:#F3F0FA;border-left:3px solid #B9A7E0;padding:6px 8px;"
+                "border-radius:3px;margin-top:4px;max-height:320px;overflow-y:auto'></div>"
+                "</details>"
                 "<table class='msg' id='stream-wrapper' style='display:none'>"
                 "<tr><td style='background:#EBF7F2'>"
                 "<b><span style='color:#008250'>AI</span></b><br>"
@@ -285,6 +319,41 @@ if _WX_AVAILABLE:
             panel = wx.Panel(self)
             self._ui_panel = panel  # stored for Layout() calls
             vbox = wx.BoxSizer(wx.VERTICAL)
+
+            # ---- Meta bar: model / live phase / context window / tokens ----
+            # Native wx widgets (not inside the WebView) so the information is
+            # always visible and updates even if the WebView shell is reloading.
+            meta_box = wx.BoxSizer(wx.VERTICAL)
+
+            meta_row1 = wx.BoxSizer(wx.HORIZONTAL)
+            self._model_label = wx.StaticText(panel, label="")
+            _model_font = self._model_label.GetFont()
+            _model_font.SetWeight(wx.FONTWEIGHT_BOLD)
+            self._model_label.SetFont(_model_font)
+            self._model_label.SetToolTip("Active provider and model")
+            meta_row1.Add(self._model_label, 0, wx.ALIGN_CENTER_VERTICAL)
+            meta_row1.AddStretchSpacer(1)
+            self._phase_label = wx.StaticText(panel, label="\u25cf Ready")
+            self._phase_label.SetToolTip("Live model status")
+            meta_row1.Add(self._phase_label, 0, wx.ALIGN_CENTER_VERTICAL)
+            meta_box.Add(meta_row1, 0, wx.EXPAND | wx.BOTTOM, 2)
+
+            meta_row2 = wx.BoxSizer(wx.HORIZONTAL)
+            self._ctx_meter = wx.StaticBitmap(
+                panel,
+                bitmap=self._make_context_meter_bitmap(0.0, bg=panel.GetBackgroundColour()),
+            )
+            self._ctx_meter.SetToolTip("Context window usage")
+            meta_row2.Add(self._ctx_meter, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+            self._ctx_label = wx.StaticText(panel, label="Context \u2014")
+            meta_row2.Add(self._ctx_label, 0, wx.ALIGN_CENTER_VERTICAL)
+            meta_row2.AddStretchSpacer(1)
+            self._tokens_label = wx.StaticText(panel, label="Tokens \u2014")
+            self._tokens_label.SetToolTip("Cumulative tokens used this session")
+            meta_row2.Add(self._tokens_label, 0, wx.ALIGN_CENTER_VERTICAL)
+            meta_box.Add(meta_row2, 0, wx.EXPAND)
+
+            vbox.Add(meta_box, 0, wx.LEFT | wx.RIGHT | wx.TOP | wx.EXPAND, 6)
 
             # ---- Conversation view (WebView when available, HtmlWindow fallback) ----
             self._use_webview = False
@@ -495,6 +564,11 @@ if _WX_AVAILABLE:
             # Timer that drains the streaming text buffer at ~20 fps
             self._stream_timer = wx.Timer(self)
             self.Bind(wx.EVT_TIMER, self._on_stream_flush, self._stream_timer)
+
+            # Lightweight timer that animates the meta bar's phase label
+            # (elapsed seconds + cycling dots) while a turn is in flight.
+            self._phase_timer = wx.Timer(self)
+            self.Bind(wx.EVT_TIMER, self._on_phase_tick, self._phase_timer)
 
             # Suicide watchdog: when KiCad is closed, our top-level wx.Frame
             # would otherwise keep the wx event loop alive. KiCad's shutdown
@@ -859,12 +933,21 @@ if _WX_AVAILABLE:
             self._stream_events.clear()
             self._pending_ai_text = ""
             self._stream_delta_chars = 0
+            self._pending_reasoning_text = ""
             self._tool_calls_made = False
             self._schematic_edited = False
             self._pcb_edited = False
             self._turn_had_text = False
             self._event_gen += 1
             self._stream_timer.Start(50)  # flush every 50 ms → ~20 fps
+
+            # Meta bar: show that the request is in flight before the first token
+            # arrives, and clear any reasoning preview from the previous turn.
+            self._ctx_limit_tokens = int(getattr(self._settings, "llm_context_tokens", 0) or 0)
+            self._set_phase("waiting")
+            if self._use_webview and self._shell_loaded:
+                self._run_script("_updateReasoning('', false)")
+            self._update_meta_bar()
 
             gen = self._event_gen
 
@@ -1138,6 +1221,171 @@ if _WX_AVAILABLE:
             A busy button is the Stop button and must stay clickable.
             """
             self._send_btn.Enable(self._server_ready or self._busy)
+
+        # ------------------------------------------------------------------ #
+        # Meta bar: model / context window / tokens / live phase
+        # ------------------------------------------------------------------ #
+
+        @staticmethod
+        def _make_context_meter_bitmap(
+            frac: float,
+            threshold: float = 0.70,
+            width: int = 140,
+            height: int = 10,
+            bg: wx.Colour | None = None,
+        ) -> wx.Bitmap:
+            """Draw the context-window fill bar (green/amber/red by pressure)."""
+            if bg is None:
+                bg = wx.WHITE
+            data = bytes((bg.Red(), bg.Green(), bg.Blue())) * (width * height)
+            img = wx.Image(width, height, data)
+            bmp = wx.Bitmap(img)
+            mdc = wx.MemoryDC()
+            mdc.SelectObject(bmp)
+            track = wx.Colour(226, 230, 236)
+            border = wx.Colour(203, 208, 216)
+            mdc.SetPen(wx.Pen(border, 1))
+            mdc.SetBrush(wx.Brush(track))
+            mdc.DrawRoundedRectangle(0, 0, width - 1, height - 1, 3)
+            frac = max(0.0, min(1.0, float(frac or 0.0)))
+            if frac > 0:
+                if frac >= min(0.95, threshold + 0.2):
+                    fill = wx.Colour(190, 30, 30)
+                elif frac >= threshold:
+                    fill = wx.Colour(190, 100, 0)
+                else:
+                    fill = wx.Colour(0, 140, 0)
+                fill_w = max(2, int((width - 2) * frac))
+                mdc.SetPen(wx.Pen(fill, 1))
+                mdc.SetBrush(wx.Brush(fill))
+                mdc.DrawRoundedRectangle(1, 1, fill_w, height - 2, 3)
+            del mdc
+            return bmp
+
+        @staticmethod
+        def _fmt_tokens(count: int) -> str:
+            """Compact token formatting: 1234 -> 1.2k, 1250000 -> 1.3M."""
+            count = int(count or 0)
+            if count >= 1_000_000:
+                return f"{count / 1_000_000:.1f}M"
+            if count >= 1_000:
+                return f"{count / 1_000:.1f}k"
+            return str(count)
+
+        def _tokens_text(self) -> str:
+            """Session token label, with an in-flight estimate while streaming."""
+            text = (
+                f"Tokens \u2191 {self._fmt_tokens(self._session_in_tokens)}"
+                f" \u00b7 \u2193 {self._fmt_tokens(self._session_out_tokens)}"
+            )
+            if self._busy and self._stream_delta_chars:
+                text += f" \u00b7 +{self._fmt_tokens(self._stream_delta_chars // 4)}"
+            return text
+
+        def _render_phase_label(self) -> None:
+            """Paint the phase label (colour + elapsed time + cycling dots)."""
+            if not hasattr(self, "_phase_label"):
+                return
+            phase = self._model_phase
+            if phase == "idle":
+                self._phase_label.SetLabel("\u25cf Ready")
+                self._phase_label.SetForegroundColour(wx.Colour(*self._C_OK))
+                return
+            verbs = {
+                "waiting": "Waiting for model",
+                "thinking": "Thinking",
+                "responding": "Responding",
+                "tool": "Running tool",
+                "error": "Error",
+            }
+            colours = {
+                "waiting": self._C_WARN,
+                "thinking": (120, 70, 190),
+                "responding": self._C_OK,
+                "tool": self._C_WARN,
+                "error": self._C_ERR,
+            }
+            dots = "." * ((self._phase_tick % 3) + 1)
+            elapsed = max(0.0, time.monotonic() - self._turn_started_at)
+            self._phase_label.SetLabel(f"\u25cf {verbs.get(phase, phase)}{dots} {elapsed:0.1f}s")
+            self._phase_label.SetForegroundColour(wx.Colour(*colours.get(phase, self._C_GREY)))
+
+        def _set_phase(self, phase: str) -> None:
+            """Set the live model phase and (re)start the animation timer."""
+            if phase == self._model_phase:
+                return
+            self._model_phase = phase
+            if phase == "idle":
+                self._phase_timer.Stop()
+            elif not self._phase_timer.IsRunning():
+                self._turn_started_at = time.monotonic()
+                self._phase_timer.Start(200)
+            self._render_phase_label()
+
+        def _on_phase_tick(self, event) -> None:
+            """Animate the phase label: cycling dots + elapsed seconds."""
+            self._phase_tick += 1
+            self._render_phase_label()
+
+        def _update_meta_bar(self) -> None:
+            """Refresh the whole meta bar (model, context, tokens, phase)."""
+            if not hasattr(self, "_model_label"):
+                return
+            provider = getattr(self._settings, "llm_provider", "") or ""
+            model = getattr(self._settings, "llm_model", "") or "\u2014"
+            self._model_label.SetLabel(f"{provider} \u00b7 {model}" if provider else model)
+
+            limit = self._ctx_limit_tokens
+            used = self._ctx_used_tokens
+            if limit > 0:
+                frac = used / limit
+                self._ctx_label.SetLabel(
+                    f"Context {self._fmt_tokens(used)} / {self._fmt_tokens(limit)}"
+                    f" ({int(round(frac * 100))}%)"
+                )
+            else:
+                frac = 0.0
+                self._ctx_label.SetLabel(f"Context {self._fmt_tokens(used)} / \u2014")
+            try:
+                threshold = float(getattr(self._settings, "llm_compact_threshold", 0.70) or 0.70)
+                self._ctx_meter.SetBitmap(
+                    self._make_context_meter_bitmap(
+                        frac, threshold, bg=self._ui_panel.GetBackgroundColour()
+                    )
+                )
+            except Exception as e:  # noqa: BLE001 -- a meter repaint must never break the turn
+                log.debug("meta bar meter update failed: %s", e)
+
+            self._tokens_label.SetLabel(self._tokens_text())
+            self._render_phase_label()
+
+        def _update_live_tokens(self) -> None:
+            """Cheap label-only refresh used on each streaming tick."""
+            if hasattr(self, "_tokens_label"):
+                self._tokens_label.SetLabel(self._tokens_text())
+
+        def _reset_token_counters(self) -> None:
+            """Zero the session token counters (new or loaded session)."""
+            self._session_in_tokens = 0
+            self._session_out_tokens = 0
+            self._last_in_tokens = 0
+            self._last_out_tokens = 0
+            self._ctx_used_tokens = 0
+            self._set_phase("idle")
+            self._update_meta_bar()
+
+        # ------------------------------------------------------------------ #
+        # Live "thinking" preview (WebView only)
+        # ------------------------------------------------------------------ #
+
+        def _update_reasoning_js(self, text: str, streaming: bool) -> None:
+            """Push the model's reasoning transcript to the shell (plain text)."""
+            if not self._use_webview or not self._shell_loaded:
+                return
+            import json as _json
+
+            js = f"_updateReasoning({_json.dumps(text)}, {'true' if streaming else 'false'})"
+            self._run_script(js)
 
         def _on_send_btn(self, event) -> None:
             """Handle send/stop button click depending on current state."""
@@ -1523,6 +1771,8 @@ if _WX_AVAILABLE:
 
             draft_changed = False
             entries_changed = False
+            reasoning_changed = False
+            meta_changed = False
             turn_ended = False
             turn_ctx: dict = {}
             for evt in events:
@@ -1544,20 +1794,62 @@ if _WX_AVAILABLE:
                     cancelled=self._cancel_event is not None and self._cancel_event.is_set(),
                     evt=evt,
                     timestamp=lambda: datetime.datetime.now().strftime("%H:%M:%S"),
+                    pending_reasoning=self._pending_reasoning_text,
+                    used_tokens=self._ctx_used_tokens,
+                    limit_tokens=self._ctx_limit_tokens,
+                    input_tokens=self._last_in_tokens,
+                    output_tokens=self._last_out_tokens,
                 )
                 self._pending_ai_text = st.pending
+                self._pending_reasoning_text = st.pending_reasoning
                 self._tool_calls_made = st.tool_calls_made
                 self._turn_had_text = st.turn_had_text
                 self._stream_delta_chars = st.delta_chars
+                self._ctx_used_tokens = st.used_tokens
+                self._ctx_limit_tokens = st.limit_tokens or self._ctx_limit_tokens
+                self._last_in_tokens = st.input_tokens
+                self._last_out_tokens = st.output_tokens
                 draft_changed |= st.draft_changed
                 entries_changed |= st.entries_changed
+                reasoning_changed |= st.reasoning_changed
+                meta_changed |= st.meta_changed
                 if st.entries_changed:
                     self._conv_version += 1
+                if etype == "usage":
+                    # One usage event per LLM call: accumulate session totals.
+                    self._session_in_tokens += st.input_tokens
+                    self._session_out_tokens += st.output_tokens
                 if etype == "turn_end":
                     turn_ended = True
                     turn_ctx = evt.get("ctx") or {}
                 if etype == "tool_call" and evt.get("name"):
                     self._mark_tool_dirty(evt["name"])
+                    self._set_phase("tool")
+                elif etype == "reasoning_chunk":
+                    self._set_phase("thinking")
+                elif etype == "text_chunk":
+                    self._set_phase("responding")
+                elif etype == "text_start":
+                    # A new LLM call began (e.g. after a tool result): back to
+                    # waiting until the first token of that call arrives.
+                    self._set_phase("waiting")
+
+            # Live "thinking" preview: streamed plain text (WebView only).
+            # The transcript grows every tick, so throttle live pushes; always
+            # push the final (collapsed) state and explicit clears.
+            if reasoning_changed and self._use_webview:
+                streaming = not self._turn_had_text
+                now = time.monotonic()
+                if (
+                    not self._pending_reasoning_text
+                    or not streaming
+                    or (now - self._last_reasoning_push) >= 0.2
+                ):
+                    self._last_reasoning_push = now
+                    self._update_reasoning_js(
+                        self._pending_reasoning_text,
+                        streaming=streaming,
+                    )
 
             # One merged render pass per tick: incremental stream update for
             # the draft, then a full conversation render for new entries.
@@ -1579,6 +1871,13 @@ if _WX_AVAILABLE:
             if entries_changed or turn_ended:
                 self._render_conversation(force_scroll_to_bottom=self._follow_output_to_bottom)
 
+            # Meta bar: full refresh when usage/context arrived, otherwise a
+            # cheap label-only refresh so the in-flight token estimate moves.
+            if meta_changed:
+                self._update_meta_bar()
+            elif draft_changed:
+                self._update_live_tokens()
+
             if turn_ended:
                 self._finish_turn(turn_ctx)
 
@@ -1595,9 +1894,14 @@ if _WX_AVAILABLE:
             )
             if self._use_webview:
                 self._hide_stream_wrapper()
+            self._pending_reasoning_text = ""
             self._busy = False
             self._cancel_event = None
             self._toggle_send_stop(busy=False)
+            # Meta bar returns to idle (reported usage, if any, is already in
+            # the totals) and the phase animation timer stops.
+            self._set_phase("idle")
+            self._update_meta_bar()
             # Auto-refresh after tool calls
             if self._tool_calls_made:
                 self._auto_refresh(ctx)
@@ -1768,6 +2072,7 @@ if _WX_AVAILABLE:
             self._cancel_event.set()  # consumer drops subsequent text_* of this turn
             if self._use_webview:
                 self._hide_stream_wrapper()
+            self._pending_reasoning_text = ""
             # Finalise whatever text the consumer already moved into the draft.
             # The queue keeps draining afterwards: later text events are
             # dropped (cancel is set), tool cards still land, and the turn_end
@@ -1786,6 +2091,10 @@ if _WX_AVAILABLE:
                     self._render_conversation(force_scroll_to_bottom=True)
             self._busy = False
             self._toggle_send_stop(busy=False)
+            # Cancelled: stop the phase animation immediately (turn_end will
+            # still arrive and finalise, but the UI should not look busy).
+            self._set_phase("idle")
+            self._update_meta_bar()
             # Persist what has been finalised so far — the turn was cancelled
             # mid-flight and on-exit autosave is best-effort only.  Note the
             # cancel event is intentionally left SET here; _finish_turn (via
@@ -2286,6 +2595,11 @@ if _WX_AVAILABLE:
             if dlg.ShowModal() == wx.ID_OK:
                 if dlg.apply_to(self._settings):
                     self._settings.save()
+                    # Model / context-window changes must be reflected live.
+                    self._ctx_limit_tokens = int(
+                        getattr(self._settings, "llm_context_tokens", 0) or 0
+                    )
+                    self._update_meta_bar()
             dlg.Destroy()
 
         # ------------------------------------------------------------------ #
@@ -2335,10 +2649,12 @@ if _WX_AVAILABLE:
             self._event_gen += 1
             self._turn_had_text = False
             self._stream_delta_chars = 0
+            self._pending_reasoning_text = ""
             self._conv_entries.clear()
             self._conv_version += 1
             self._pending_ai_text = ""
             self._current_session_file = None
+            self._reset_token_counters()
             self._render_conversation()
             if self._llm_client:
                 self._llm_client.reset()
@@ -2534,7 +2850,10 @@ if _WX_AVAILABLE:
             self._turn_had_text = False
             self._stream_delta_chars = 0
             self._pending_ai_text = ""
+            self._pending_reasoning_text = ""
             self._conv_entries = data.get("conv_entries", [])
+            # Token usage is not persisted per session: start fresh counters.
+            self._reset_token_counters()
             # Loaded content already matches this file on disk: mark it as
             # saved so a plain close (no user edits) does not rewrite it.
             self._saved_conv_version = self._conv_version
@@ -3413,14 +3732,17 @@ if _WX_AVAILABLE:
                 self._stream_wrapper_visible = True
 
         def _hide_stream_wrapper(self) -> None:
-            """Hide the stream-wrapper table and clear pending text."""
-            if not self._shell_loaded or not self._stream_wrapper_visible:
+            """Hide the streaming table + thinking preview and clear both."""
+            if not self._shell_loaded:
                 return  # No-op
 
             ok, _ = self._run_script(
                 "var w=document.getElementById('stream-wrapper');"
                 "if(w)w.style.display='none';"
                 "document.getElementById('pending-ai-text').innerHTML='';"
+                "var r=document.getElementById('reasoning-wrapper');"
+                "if(r){r.style.display='none';r.open=false;}"
+                "document.getElementById('reasoning-text').textContent='';"
             )
             if ok:
                 self._stream_wrapper_visible = False
