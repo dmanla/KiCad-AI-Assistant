@@ -8,7 +8,7 @@ def _make_mcp():
         def __init__(self):
             self.tools = {}
 
-        def tool(self):
+        def tool(self, *args, **kwargs):
             def decorator(fn):
                 self.tools[fn.__name__] = fn
                 return fn
