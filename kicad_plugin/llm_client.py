@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+import difflib
 import json
 import logging
 import os
@@ -245,6 +246,70 @@ _current_reasoning: list[str] = []
 # single-turn output, so max_tokens never becomes the binding constraint
 # that truncates a tool-calling response.
 _ANTHROPIC_DEFAULT_MAX_TOKENS = 65536
+
+# ------------------------------------------------------------------
+# On-demand tool loading (issue #129)
+# ------------------------------------------------------------------
+#
+# The full tool catalog (110+ schemas) is expensive as a fixed per-request
+# cost (~46K estimated tokens). Instead of sending every schema with every
+# request, the client exposes two small discovery meta-tools and only sends
+# schemas the model explicitly loaded. The budget check in _maybe_compact
+# accounts for the loaded subset.
+
+_META_TOOL_NAMES = frozenset({"list_tools", "get_tool_schema"})
+
+_TOOL_LOADING_PROMPT = (
+    "\n\n## Tool loading protocol\n"
+    "- Only tools whose schema you have loaded are callable.\n"
+    "- Call `list_tools(query)` to discover available tools (loaded tools are marked).\n"
+    "- Call `get_tool_schema(name)` to load a tool before calling it.\n"
+    "- Calls to tools that are not loaded are rejected — load the schema first.\n"
+    "- Do one discovery round (list_tools → get_tool_schema), then execute."
+)
+
+_META_TOOL_DEFS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "list_tools",
+            "description": (
+                "Discover available KiCad tools. Returns tools whose name or summary matches "
+                "the query, each with a one-line summary and a 'loaded' flag marking whether "
+                "its schema is already available for calling."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Optional search term; empty returns the full catalog.",
+                    }
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_tool_schema",
+            "description": (
+                "Load the full JSON schema for one tool so it becomes callable in the next "
+                "request. Use the exact tool name returned by list_tools."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tool_name": {
+                        "type": "string",
+                        "description": "Exact tool name as returned by list_tools.",
+                    }
+                },
+                "required": ["tool_name"],
+            },
+        },
+    },
+]
 
 
 def _is_certificate_verification_error(error: BaseException) -> bool:
@@ -954,10 +1019,22 @@ class LLMClient:
         self._keep_recent_turns: int = getattr(settings, "llm_keep_recent_turns", 4)
         self._max_tokens: int = getattr(settings, "llm_max_tokens", 0)
         self._history: list[dict[str, Any]] = []
+        # On-demand tool loading: full catalog cached per session; only loaded
+        # schemas are sent with each request (LRU-bounded).
+        self._tool_registry: dict[str, dict[str, Any]] | None = None
+        self._loaded_tools: dict[str, dict[str, Any]] = {}
+        self._max_loaded_tools: int = 12
+        # One-shot context-window diagnostics (issue #129).
+        self._fixed_overhead_warned: bool = False
+        self._budget_warned: bool = False
 
     def reset(self) -> None:
-        """Clear conversation history."""
+        """Clear conversation history, loaded-tool set, and one-shot warnings."""
         self._history = []
+        self._loaded_tools.clear()
+        self._fixed_overhead_warned = False
+        self._budget_warned = False
+        # self._tool_registry is kept: the tool catalog is stable per session.
 
     def set_base_url(self, url: str | None) -> None:
         """Set the MCP backend base URL after construction.
@@ -1542,13 +1619,21 @@ class LLMClient:
                 removed_count,
             )
 
-    def _maybe_compact(self, system_prompt: str, on_compacted=None) -> None:
+    def _maybe_compact(
+        self, system_prompt: str, on_compacted=None, on_warning=None, tools_est_tokens: int = 0
+    ) -> None:
         """Manage history purely by token budget.
 
         Under budget, history is left byte-identical (append-only growth), so
         provider automatic prefix caches stay valid across turns.  All history
         mutation — dedup of superseded tool turns, stale-query annotations, and
         compaction — happens only once the budget is exceeded.
+
+        Usage includes ``tools_est_tokens`` (the loaded tool schemas), so the
+        budget reflects the real request size (issue #129).  One-shot warnings
+        are emitted through ``on_warning`` when the window is hopelessly small
+        (fixed overhead alone over budget) or the budget is exceeded with
+        nothing to compact — instead of silently sending an oversized request.
 
         The one exception is ``_prune_rollback_history``: restoring an earlier
         file version invalidates prior tool turns, so those are removed every
@@ -1559,8 +1644,26 @@ class LLMClient:
         # ---- Budget check --------------------------------------------------
         system_tokens = len(system_prompt) // 4
         history_tokens = self._estimate_tokens(self._history)
-        used = system_tokens + history_tokens
+        used = system_tokens + history_tokens + tools_est_tokens
         budget = self._context_tokens * self._compact_threshold
+
+        # Fixed overhead (system + discovery tools) alone over budget: no
+        # request can ever fit, regardless of history — surface it once.
+        fixed = system_tokens + len(json.dumps(_META_TOOL_DEFS)) // 4
+        if fixed > budget and not self._fixed_overhead_warned:
+            self._fixed_overhead_warned = True
+            msg = (
+                f"Context window too small for fixed overhead: system + discovery tools "
+                f"≈{fixed} tokens exceeds {self._compact_threshold:.0%} of the configured "
+                f"{self._context_tokens}-token window (budget {budget:.0f}). Increase "
+                "llm_context_tokens in the settings."
+            )
+            log.warning("%s", msg)
+            if on_warning is not None:
+                try:
+                    on_warning(msg)
+                except Exception as e:
+                    log.warning("on_warning callback failed: %s", e)
 
         if used <= budget:
             return  # well within limits — history stays append-only for cache
@@ -1568,7 +1671,7 @@ class LLMClient:
         # ---- Over budget: cheapest saving first — drop superseded turns ----
         self._dedup_tool_calls()
         history_tokens = self._estimate_tokens(self._history)
-        used = system_tokens + history_tokens
+        used = system_tokens + history_tokens + tools_est_tokens
         if used <= budget:
             return  # dedup alone brought us back within budget
 
@@ -1592,7 +1695,8 @@ class LLMClient:
 
         target_post_compact = self._context_tokens * self._compact_target_threshold
         target_summary_chars = max(
-            200, int((target_post_compact - system_tokens - recent_tokens) * 4)
+            200,
+            int((target_post_compact - system_tokens - recent_tokens - tools_est_tokens) * 4),
         )
 
         compacted = self._compact_history(system_prompt, target_summary_chars)
@@ -1601,6 +1705,20 @@ class LLMClient:
             on_compacted(
                 "⟲ History compacted — earlier context summarised; recent turns kept verbatim."
             )
+        elif not compacted and not self._budget_warned and not self._fixed_overhead_warned:
+            self._budget_warned = True
+            msg = (
+                f"Context budget exceeded but history is too short to compact (used ≈{used} "
+                f"tokens of budget {budget:.0f}: system {system_tokens} + history "
+                f"{history_tokens} + loaded tools {tools_est_tokens}). The next request may "
+                "overflow the model window. Increase llm_context_tokens or reduce the tool set."
+            )
+            log.warning("%s", msg)
+            if on_warning is not None:
+                try:
+                    on_warning(msg)
+                except Exception as e:
+                    log.warning("on_warning callback failed: %s", e)
 
         # Annotate stale query results among the preserved turns only — the
         # compacted prefix is summarized, so nothing earlier needs marking.
@@ -1739,6 +1857,137 @@ class LLMClient:
                         state.dirty_paths.discard(reload_path)
         return result
 
+    # ------------------------------------------------------------------
+    # On-demand tool loading (issue #129)
+    # ------------------------------------------------------------------
+
+    def _build_request_tools(self) -> list[dict[str, Any]]:
+        """Discovery meta-tools plus the currently loaded tool schemas."""
+        return list(_META_TOOL_DEFS) + list(self._loaded_tools.values())
+
+    def _loaded_tools_est_tokens(self) -> int:
+        """Estimated token cost of loaded schemas (chars/4, matching _estimate_tokens)."""
+        return sum(len(json.dumps(d)) for d in self._loaded_tools.values()) // 4
+
+    def _load_tool_schema(self, tool_name: str) -> dict[str, Any] | None:
+        """Load one schema into the LRU-bounded loaded set; return its def or None."""
+        if self._tool_registry is None:
+            self._fetch_tool_definitions()
+        registry = self._tool_registry or {}
+        if tool_name not in registry:
+            return None
+        self._loaded_tools.pop(tool_name, None)
+        self._loaded_tools[tool_name] = registry[tool_name]
+        while len(self._loaded_tools) > self._max_loaded_tools:
+            self._loaded_tools.pop(next(iter(self._loaded_tools)))
+        return registry[tool_name]
+
+    def _execute_meta_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        """Execute one of the discovery meta-tools locally (never sent to MCP)."""
+        if name == "list_tools":
+            query = (args.get("query") or "").strip().lower()
+            if self._tool_registry is None:
+                self._fetch_tool_definitions()
+            registry = self._tool_registry or {}
+            matches = []
+            for tname, tdef in registry.items():
+                if query and query not in tname.lower():
+                    desc = (tdef["function"].get("description") or "").strip()
+                    if query not in desc.lower():
+                        continue
+                summary = (tdef["function"].get("description") or "").strip().splitlines()
+                matches.append(
+                    {
+                        "name": tname,
+                        "summary": (summary[0] if summary else "")[:200],
+                        "loaded": tname in self._loaded_tools,
+                    }
+                )
+            matches.sort(key=lambda m: (not m["loaded"], m["name"]))
+            return {
+                "success": True,
+                "count": len(matches),
+                "tools": matches[:50],
+                "truncated": len(matches) > 50,
+                "note": "Call get_tool_schema(name) to load a tool before calling it.",
+            }
+        if name == "get_tool_schema":
+            tool_name = (args.get("tool_name") or "").strip()
+            if tool_name:
+                if tool_name in _META_TOOL_NAMES:
+                    return {
+                        "success": True,
+                        "tool": tool_name,
+                        "loaded": True,
+                        "always_available": True,
+                    }
+                if self._tool_registry is None:
+                    self._fetch_tool_definitions()
+                if tool_name in (self._tool_registry or {}):
+                    if get_missing_tool_policies([tool_name]):
+                        return {
+                            "success": False,
+                            "error": (
+                                f"Tool {tool_name!r} has no execution policy registered — "
+                                "refusing to load it (server/client mismatch)."
+                            ),
+                        }
+                    loaded = self._load_tool_schema(tool_name)
+                    if loaded is not None:
+                        return {
+                            "success": True,
+                            "tool": tool_name,
+                            "loaded": True,
+                            "description": loaded["function"].get("description") or "",
+                            "schema": loaded["function"].get("parameters") or {},
+                        }
+            registry = self._tool_registry or {}
+            suggestions = (
+                difflib.get_close_matches(tool_name, registry.keys(), n=5, cutoff=0.4)
+                if tool_name
+                else []
+            )
+            return {
+                "success": False,
+                "error": (
+                    f"Unknown tool {tool_name!r}. Use list_tools(query) to browse the catalog."
+                ),
+                "suggestions": suggestions,
+            }
+        return {"success": False, "error": f"Unknown meta tool {name!r}"}
+
+    def _execute_or_reject_tool(
+        self,
+        name: str,
+        args: dict[str, Any],
+        state: _ToolExecutionState,
+        on_tool_call: Callable[[str, dict, Any], None] | None,
+    ) -> dict[str, Any]:
+        """Dispatch one model tool call: meta tools locally, loaded tools via policy.
+
+        Calls to real tools whose schema was never loaded are rejected with a
+        clear instruction instead of executing with guessed arguments — crucial
+        for mutation tools.
+        """
+        if name in _META_TOOL_NAMES:
+            result = self._execute_meta_tool(name, args)
+            self._emit_tool_callback(on_tool_call, name, args, result)
+            return result
+        if name not in self._loaded_tools:
+            result = {
+                "success": False,
+                "error": (
+                    f"Tool {name!r} is not loaded — call get_tool_schema({name!r}) first "
+                    f"(or list_tools() to browse)."
+                ),
+            }
+            self._emit_tool_callback(on_tool_call, name, args, result)
+            return result
+        result = self._execute_tool_with_policy(name, args, state, on_tool_call)
+        # Bump recency so LRU eviction prefers tools not used recently.
+        self._loaded_tools[name] = self._loaded_tools.pop(name)
+        return result
+
     def _auto_reload_modified_files(
         self,
         state: _ToolExecutionState,
@@ -1765,6 +2014,7 @@ class LLMClient:
         on_tool_call: Callable[[str, dict, Any], None] | None = None,
         on_stream_event: Callable[[dict], None] | None = None,
         on_compacted: Callable[[str], None] | None = None,
+        on_warning: Callable[[str], None] | None = None,
         images: list[dict[str, Any]] | None = None,
     ) -> str:
         """
@@ -1783,6 +2033,9 @@ class LLMClient:
             on_compacted:  Optional callback(notice) fired when history
                            compaction summarised part of the conversation —
                            the UI surfaces this as a chat notice.
+            on_warning:    Optional callback(notice) for one-shot context-window
+                           diagnostics (fixed overhead over budget, budget
+                           exceeded with nothing to compact).
             images:        Optional list of dicts {"media_type": "image/png",
                            "data": "<base64>"} attached to this user message.
 
@@ -1795,14 +2048,19 @@ class LLMClient:
         if isinstance(user_message, dict) and user_message.get("kind") == "tool_direct":
             return self._run_tool_direct(user_message, on_tool_call)
 
-        system = build_system_prompt(context_block)
+        system = build_system_prompt(context_block) + _TOOL_LOADING_PROMPT
         content = self._build_user_content(user_message, images)
         self._history.append({"role": "user", "content": content})
-        self._maybe_compact(system, on_compacted)
+        tools_est = self._loaded_tools_est_tokens() + len(json.dumps(_META_TOOL_DEFS)) // 4
+        self._maybe_compact(system, on_compacted, on_warning=on_warning, tools_est_tokens=tools_est)
 
-        tools = self._fetch_tool_definitions()
+        tools = self._build_request_tools()
         missing_policies = get_missing_tool_policies(
-            [tool["function"]["name"] for tool in tools if tool.get("function", {}).get("name")]
+            [
+                tool["function"]["name"]
+                for tool in tools
+                if tool["function"]["name"] not in _META_TOOL_NAMES
+            ]
         )
         if missing_policies:
             return "[Framework error] Tool policy registry is missing entries for: " + ", ".join(
@@ -1848,7 +2106,7 @@ class LLMClient:
                     except json.JSONDecodeError:
                         args = {}
 
-                    result = self._execute_tool_with_policy(name, args, state, on_tool_call)
+                    result = self._execute_or_reject_tool(name, args, state, on_tool_call)
 
                     tool_results.append(
                         {
@@ -1909,7 +2167,15 @@ class LLMClient:
         return blocks
 
     def _fetch_tool_definitions(self) -> list[dict[str, Any]]:
-        """Fetch available tools from the MCP server and convert to LLM format."""
+        """Fetch the full tool catalog from the MCP server and cache it per session.
+
+        Returns all converted definitions (consumed by the discovery tools);
+        the per-request schema set comes from ``_build_request_tools`` (the
+        loaded subset + meta-tools).
+        """
+        if self._tool_registry is not None:
+            return list(self._tool_registry.values())
+
         import urllib.error
         import urllib.request
 
@@ -1935,7 +2201,7 @@ class LLMClient:
 
         tools_raw = body.get("result", {}).get("tools", [])
         # Convert MCP tool schema to OpenAI function-call format
-        return [
+        converted = [
             {
                 "type": "function",
                 "function": {
@@ -1946,6 +2212,8 @@ class LLMClient:
             }
             for t in tools_raw
         ]
+        self._tool_registry = {d["function"]["name"]: d for d in converted}
+        return converted
 
     def _call_llm(self, system: str, tools: list[dict], on_stream_event=None) -> dict[str, Any]:
         """Dispatch to the configured LLM provider."""

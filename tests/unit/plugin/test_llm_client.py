@@ -503,9 +503,7 @@ class TestRunIntegration:
         }
         final_response = {"finish_reason": "stop", "message": {"content": "done"}}
         client._call_llm = MagicMock(side_effect=[tool_response, final_response])
-        client._fetch_tool_definitions = MagicMock(
-            return_value=[{"function": {"name": "set_footprint_position"}}]
-        )
+        client._loaded_tools = {"set_footprint_position": _fake_tool_def("set_footprint_position")}
         on_tool_call = MagicMock()
 
         with patch("kicad_plugin.llm_client.call_mcp_tool") as mock_call_tool:
@@ -567,9 +565,7 @@ class TestRunIntegration:
         }
         final_response = {"finish_reason": "stop", "message": {"content": "done"}}
         client._call_llm = MagicMock(side_effect=[tool_response, final_response])
-        client._fetch_tool_definitions = MagicMock(
-            return_value=[{"function": {"name": "pcb_route_pad_to_pad"}}]
-        )
+        client._loaded_tools = {"pcb_route_pad_to_pad": _fake_tool_def("pcb_route_pad_to_pad")}
         on_tool_call = MagicMock()
 
         with patch("kicad_plugin.llm_client.call_mcp_tool") as mock_call_tool:
@@ -633,9 +629,7 @@ class TestRunIntegration:
             },
         }
         client._call_llm = MagicMock(side_effect=[tool_response, {"error": "API down"}])
-        client._fetch_tool_definitions = MagicMock(
-            return_value=[{"function": {"name": "set_footprint_position"}}]
-        )
+        client._loaded_tools = {"set_footprint_position": _fake_tool_def("set_footprint_position")}
 
         with patch("kicad_plugin.llm_client.call_mcp_tool") as mock_call_tool:
             mock_call_tool.side_effect = [
@@ -677,9 +671,7 @@ class TestRunIntegration:
             },
         }
         client._call_llm = MagicMock(return_value=tool_response)  # never stops calling tools
-        client._fetch_tool_definitions = MagicMock(
-            return_value=[{"function": {"name": "set_footprint_position"}}]
-        )
+        client._loaded_tools = {"set_footprint_position": _fake_tool_def("set_footprint_position")}
 
         with patch("kicad_plugin.llm_client.call_mcp_tool") as mock_call_tool:
             mock_call_tool.side_effect = lambda base, name, args: (
@@ -731,12 +723,10 @@ class TestRunIntegration:
             },
         }
         client._call_llm = MagicMock(side_effect=[tool_response])
-        client._fetch_tool_definitions = MagicMock(
-            return_value=[
-                {"function": {"name": "set_footprint_position"}},
-                {"function": {"name": "flip_footprint"}},
-            ]
-        )
+        client._loaded_tools = {
+            "set_footprint_position": _fake_tool_def("set_footprint_position"),
+            "flip_footprint": _fake_tool_def("flip_footprint"),
+        }
 
         with patch("kicad_plugin.llm_client.call_mcp_tool") as mock_call_tool:
             mock_call_tool.side_effect = [
@@ -788,12 +778,10 @@ class TestRunIntegration:
         }
         final_response = {"finish_reason": "stop", "message": {"content": "done"}}
         client._call_llm = MagicMock(side_effect=[tool_response, final_response])
-        client._fetch_tool_definitions = MagicMock(
-            return_value=[
-                {"function": {"name": "set_footprint_position"}},
-                {"function": {"name": "flip_footprint"}},
-            ]
-        )
+        client._loaded_tools = {
+            "set_footprint_position": _fake_tool_def("set_footprint_position"),
+            "flip_footprint": _fake_tool_def("flip_footprint"),
+        }
 
         with patch("kicad_plugin.llm_client.call_mcp_tool") as mock_call_tool:
             mock_call_tool.side_effect = [
@@ -873,12 +861,10 @@ class TestRunIntegration:
         }
         final_response = {"finish_reason": "stop", "message": {"content": "done"}}
         client._call_llm = MagicMock(side_effect=[save_response, mutate_response, final_response])
-        client._fetch_tool_definitions = MagicMock(
-            return_value=[
-                {"function": {"name": "save_project_version"}},
-                {"function": {"name": "set_footprint_position"}},
-            ]
-        )
+        client._loaded_tools = {
+            "save_project_version": _fake_tool_def("save_project_version"),
+            "set_footprint_position": _fake_tool_def("set_footprint_position"),
+        }
 
         with patch("kicad_plugin.llm_client.call_mcp_tool") as mock_call_tool:
             mock_call_tool.side_effect = [
@@ -932,9 +918,7 @@ class TestRunIntegration:
         }
         final_response = {"finish_reason": "stop", "message": {"content": "done"}}
         client._call_llm = MagicMock(side_effect=[tool_response, final_response])
-        client._fetch_tool_definitions = MagicMock(
-            return_value=[{"function": {"name": "set_footprint_position"}}]
-        )
+        client._loaded_tools = {"set_footprint_position": _fake_tool_def("set_footprint_position")}
 
         with patch("kicad_plugin.llm_client.call_mcp_tool") as mock_call_tool:
             mock_call_tool.return_value = {"success": False, "error": "disk full"}
@@ -957,19 +941,14 @@ class TestRunIntegration:
             "Failed to save project version before set_footprint_position" in tool_result["error"]
         )
 
-    def test_run_reports_missing_tool_policy_before_calling_llm(self):
+    def test_get_tool_schema_refuses_tools_without_policy(self):
+        """A tool with no execution policy must never become callable (issue #129)."""
         client = _make_client()
-        client._fetch_tool_definitions = MagicMock(
-            return_value=[{"function": {"name": "unknown_tool"}}]
-        )
-        client._call_llm = MagicMock()
-
-        result = client.run("hello", context_block="")
-
-        assert (
-            result == "[Framework error] Tool policy registry is missing entries for: unknown_tool"
-        )
-        client._call_llm.assert_not_called()
+        client._tool_registry = {"unknown_tool": _fake_tool_def("unknown_tool")}
+        result = client._execute_meta_tool("get_tool_schema", {"tool_name": "unknown_tool"})
+        assert result["success"] is False
+        assert "no execution policy" in result["error"]
+        assert "unknown_tool" not in client._loaded_tools
 
 
 class TestToolPolicyRegistry:
@@ -2415,3 +2394,129 @@ class TestToolDirectRequest:
         with patch("kicad_plugin.llm_client.call_mcp_tool", return_value={"status": "started"}):
             reply = client.run({"not": "a request"}, "")
         assert isinstance(reply, str)
+
+
+# ---------------------------------------------------------------------------
+# On-demand tool loading (issue #129)
+# ---------------------------------------------------------------------------
+
+
+def _fake_tool_def(name, description="does something", schema=None):
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": schema or {"type": "object", "properties": {}},
+        },
+    }
+
+
+class TestToolLoading:
+    def test_request_tools_meta_only_by_default(self):
+        client = _make_client()
+        tools = client._build_request_tools()
+        assert [t["function"]["name"] for t in tools] == ["list_tools", "get_tool_schema"]
+
+    def test_get_tool_schema_loads_into_next_request(self):
+        client = _make_client()
+        client._tool_registry = {
+            "extract_schematic_netlist": _fake_tool_def(
+                "extract_schematic_netlist", "Extract the schematic netlist."
+            ),
+            "get_board_info": _fake_tool_def("get_board_info", "General board information."),
+        }
+        result = client._execute_meta_tool(
+            "get_tool_schema", {"tool_name": "extract_schematic_netlist"}
+        )
+        assert result["success"] is True
+        assert result["loaded"] is True
+        names = [t["function"]["name"] for t in client._build_request_tools()]
+        assert names == ["list_tools", "get_tool_schema", "extract_schematic_netlist"]
+
+    def test_list_tools_filters_and_marks_loaded(self):
+        client = _make_client()
+        client._tool_registry = {
+            "extract_netlist": _fake_tool_def("extract_netlist", "Extract the schematic netlist."),
+            "get_board_info": _fake_tool_def("get_board_info", "General board information."),
+            "add_zone": _fake_tool_def("add_zone", "Add a copper zone."),
+        }
+        client._load_tool_schema("get_board_info")
+        result = client._execute_meta_tool("list_tools", {"query": "netlist"})
+        assert [t["name"] for t in result["tools"]] == ["extract_netlist"]
+        all_tools = client._execute_meta_tool("list_tools", {"query": ""})
+        flags = {t["name"]: t["loaded"] for t in all_tools["tools"]}
+        assert flags == {
+            "extract_netlist": False,
+            "get_board_info": True,
+            "add_zone": False,
+        }
+
+    def test_unknown_schema_suggests_close_matches(self):
+        client = _make_client()
+        client._tool_registry = {
+            "extract_schematic_netlist": _fake_tool_def("extract_schematic_netlist")
+        }
+        result = client._execute_meta_tool(
+            "get_tool_schema", {"tool_name": "extract_schematic_nettlist"}
+        )
+        assert result["success"] is False
+        assert "extract_schematic_netlist" in result["suggestions"]
+
+    def test_unloaded_real_tool_rejected_without_network(self):
+        client = _make_client()
+        client._tool_registry = {"extract_netlist": _fake_tool_def("extract_netlist")}
+        state = llm_client._ToolExecutionState()
+        result = client._execute_or_reject_tool("extract_netlist", {}, state, None)
+        assert result["success"] is False
+        assert "not loaded" in result["error"]
+
+    def test_meta_tool_executed_locally(self):
+        client = _make_client()
+        client._tool_registry = {}
+        state = llm_client._ToolExecutionState()
+        result = client._execute_or_reject_tool("list_tools", {"query": ""}, state, None)
+        assert result["success"] is True
+
+    def test_lru_cap_evicts_oldest(self):
+        client = _make_client()
+        client._max_loaded_tools = 2
+        client._tool_registry = {f"tool_{i}": _fake_tool_def(f"tool_{i}") for i in range(4)}
+        for i in range(4):
+            client._load_tool_schema(f"tool_{i}")
+        assert list(client._loaded_tools) == ["tool_2", "tool_3"]
+
+
+class TestContextBudgetIncludesTools:
+    def test_tools_est_push_over_budget_triggers_compaction(self):
+        client = _make_client(context_tokens=10_000)  # budget = 7000
+        client._history = [_user("q1"), _assistant("a1"), _user("q2")]
+        calls = []
+        client._compact_history = lambda _system, _target: calls.append(1) or True
+        # Without tools this request would be well under budget (~1K tokens).
+        client._maybe_compact("x" * 4_000, tools_est_tokens=6_000)
+        assert calls
+
+    def test_tools_est_excluded_does_not_compact(self):
+        client = _make_client(context_tokens=10_000)
+        client._history = [_user("q1"), _assistant("a1"), _user("q2")]
+        calls = []
+        client._compact_history = lambda _system, _target: calls.append(1) or True
+        client._maybe_compact("x" * 4_000)
+        assert not calls
+
+    def test_fixed_overhead_warning_fires_once(self):
+        client = _make_client(context_tokens=2_000)  # budget 1400 < system+meta
+        warned = []
+        client._maybe_compact("x" * 8_000, on_warning=warned.append)
+        client._maybe_compact("x" * 8_000, on_warning=warned.append)
+        client._maybe_compact("x" * 8_000, on_warning=warned.append)
+        assert len(warned) == 1
+
+    def test_budget_noop_warning_when_nothing_to_compact(self):
+        client = _make_client(context_tokens=100_000)  # budget 70_000
+        client._history = [_user("q1"), _assistant("a1"), _user("q2")]
+        warned = []
+        client._maybe_compact("x" * 4_000, on_warning=warned.append, tools_est_tokens=69_000)
+        assert len(warned) == 1
+        assert "too short to compact" in warned[0]

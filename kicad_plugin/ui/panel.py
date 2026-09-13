@@ -959,6 +959,9 @@ if _WX_AVAILABLE:
                             on_compacted=lambda notice: _emit(
                                 {"type": "status", "text": notice, "color_hex": self._C_WARN_HEX}
                             ),
+                            on_warning=lambda notice: _emit(
+                                {"type": "status", "text": notice, "color_hex": self._C_WARN_HEX}
+                            ),
                             images=images,
                         )
                     else:  # tool_direct
