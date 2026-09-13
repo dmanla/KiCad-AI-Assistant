@@ -102,7 +102,7 @@ if _WX_AVAILABLE:
                 wx.StaticText(self, label="Context window (tokens):"), 0, wx.ALIGN_CENTER_VERTICAL
             )
             self._context_tokens = wx.SpinCtrl(
-                self, min=1000, max=2_000_000, initial=self._settings.llm_context_tokens
+                self, min=1000, max=10_000_000, initial=self._settings.llm_context_tokens
             )
             self._context_tokens.SetToolTip(
                 "Context window size. When auto-detect is on, this is the "
