@@ -104,7 +104,25 @@ if _WX_AVAILABLE:
             self._context_tokens = wx.SpinCtrl(
                 self, min=1000, max=2_000_000, initial=self._settings.llm_context_tokens
             )
+            self._context_tokens.SetToolTip(
+                "Context window size. When auto-detect is on, this is the "
+                "fallback used if the provider does not report a size."
+            )
             grid.Add(self._context_tokens, 1, wx.EXPAND)
+
+            grid.Add(
+                wx.StaticText(self, label="Auto-detect context window:"),
+                0,
+                wx.ALIGN_CENTER_VERTICAL,
+            )
+            self._context_auto = wx.CheckBox(self)
+            self._context_auto.SetValue(getattr(self._settings, "llm_context_auto", True))
+            self._context_auto.SetToolTip(
+                "Ask the provider for the model's context window (Anthropic, "
+                "Kilo/OpenRouter/LM Studio/vLLM, Ollama). Falls back to the "
+                "value above when unsupported."
+            )
+            grid.Add(self._context_auto, 1)
 
             grid.Add(
                 wx.StaticText(self, label="Compaction threshold (0–1):"),
@@ -196,6 +214,7 @@ if _WX_AVAILABLE:
             settings.server_port = self._port.GetValue()
             settings.show_tool_log = self._show_tool_log.GetValue()
             settings.llm_context_tokens = self._context_tokens.GetValue()
+            settings.llm_context_auto = self._context_auto.GetValue()
             settings.llm_compact_threshold = compact_threshold
             settings.llm_compact_target_threshold = compact_target
             settings.llm_keep_recent_turns = self._keep_recent_turns.GetValue()

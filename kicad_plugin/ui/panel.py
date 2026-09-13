@@ -20,6 +20,8 @@ import threading
 import time
 from typing import Any
 
+from ..context_window import clear_cache as _clear_context_cache
+from ..context_window import detect_context_tokens as _detect_context_tokens
 from .stream_events import apply_stream_event, make_ai_entry
 
 log = logging.getLogger(__name__)
@@ -635,6 +637,7 @@ if _WX_AVAILABLE:
                 from ..llm_client import LLMClient
 
                 self._llm_client = LLMClient(self._settings, self._server_mgr.base_url)
+                self._detect_context_window_async()
                 self._autoload_session()
                 self._start_project_watch()
                 # Auto-sync the footprint index for the current project
@@ -1372,6 +1375,48 @@ if _WX_AVAILABLE:
             self._last_out_tokens = 0
             self._ctx_used_tokens = 0
             self._set_phase("idle")
+            self._update_meta_bar()
+
+        # ------------------------------------------------------------------ #
+        # Context-window auto-detection
+        # ------------------------------------------------------------------ #
+
+        def _detect_context_window_async(self) -> None:
+            """Detect the model's context window off the UI thread.
+
+            Detection performs one small HTTP request, so it must never run on
+            the wx main thread. The result is applied back via wx.CallAfter.
+            """
+            if not getattr(self._settings, "llm_context_auto", True):
+                return
+            settings = self._settings
+
+            def _work() -> None:
+                try:
+                    tokens = _detect_context_tokens(settings)
+                except Exception:
+                    log.debug("context window detection thread failed", exc_info=True)
+                    return
+                if tokens:
+                    try:
+                        wx.CallAfter(self._apply_detected_context, tokens)
+                    except Exception:
+                        log.debug("could not marshal detected context window", exc_info=True)
+
+            threading.Thread(target=_work, name="kcaa-context-detect", daemon=True).start()
+
+        def _apply_detected_context(self, tokens: int) -> None:
+            """Apply an auto-detected context window to the bar and the client."""
+            self._ctx_limit_tokens = int(tokens)
+            # Keep the configured fallback in sync so the settings dialog shows
+            # the detected size and it persists if the user saves settings.
+            self._settings.llm_context_tokens = int(tokens)
+            if self._llm_client is not None:
+                try:
+                    self._llm_client.set_context_tokens(tokens)
+                except Exception:
+                    log.debug("could not apply detected context to client", exc_info=True)
+            log.info("context window auto-detected: %s tokens", f"{int(tokens):,}")
             self._update_meta_bar()
 
         # ------------------------------------------------------------------ #
@@ -2599,7 +2644,13 @@ if _WX_AVAILABLE:
                     self._ctx_limit_tokens = int(
                         getattr(self._settings, "llm_context_tokens", 0) or 0
                     )
+                    if self._llm_client is not None:
+                        self._llm_client.set_context_tokens(self._ctx_limit_tokens)
                     self._update_meta_bar()
+                    # The provider or model may have changed: forget cached
+                    # detections and resolve the context window again.
+                    _clear_context_cache()
+                    self._detect_context_window_async()
             dlg.Destroy()
 
         # ------------------------------------------------------------------ #

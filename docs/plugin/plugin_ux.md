@@ -95,6 +95,25 @@ When the model emits reasoning ("thinking") text, the panel shows a collapsible
 process" once the model starts its answer. Reasoning text is ephemeral: it is
 never saved to the session file.
 
+#### Context-window auto-detection
+
+The context-window size is detected from the provider whenever the provider or
+model changes, so the meter reflects the model's real capacity:
+
+- **Anthropic** — `GET /v1/models/{model}` returns `max_input_tokens`.
+- **Ollama** — `POST /api/show` returns `model_info.<arch>.context_length`.
+- **Kilo gateway, OpenRouter, LM Studio, vLLM, and other OpenAI-compatible
+  servers** — the model list endpoint returns `context_length` (or
+  `max_context_length` / `max_model_len` / `context_window`).
+- **OpenAI** — its `/v1/models` endpoint does not report a context window, so a
+  small built-in catalog supplies values for well-known model families.
+
+Detection runs off the UI thread and never blocks or fails a chat turn. If the
+provider does not report a size, the plugin keeps the configured value. The
+settings dialog has an **Auto-detect context window** checkbox; unchecking it
+uses the **Context window (tokens)** value verbatim, and that value also acts as
+the fallback when detection is unavailable.
+
 ---
 
 ## 4. Tool Log

@@ -119,6 +119,34 @@ class TestSetBaseUrl:
         assert client._mcp_base_url == "http://127.0.0.1:1234"
 
 
+class TestContextTokens:
+    def test_set_context_tokens_updates_effective_window(self):
+        client = _make_client(context_tokens=10_000)
+        client.set_context_tokens(1_000_000)
+        assert client.get_context_tokens() == 1_000_000
+
+    def test_set_context_tokens_ignores_invalid_values(self):
+        client = _make_client(context_tokens=10_000)
+        client.set_context_tokens(0)
+        client.set_context_tokens(-5)
+        client.set_context_tokens("nonsense")
+        assert client.get_context_tokens() == 10_000
+
+    def test_missing_context_setting_falls_back_to_default(self):
+        settings = types.SimpleNamespace(
+            llm_provider="openai",
+            llm_api_key="sk-test",
+            llm_model="gpt-4o",
+            llm_base_url="",
+            llm_context_tokens=None,
+            llm_compact_threshold=0.70,
+            llm_compact_target_threshold=0.49,
+            llm_keep_recent_turns=4,
+        )
+        client = LLMClient(settings, mcp_base_url="http://127.0.0.1:9999")
+        assert client.get_context_tokens() == 128_000
+
+
 class TestDedupToolCalls:
     def test_no_change_when_no_tool_calls(self):
         client = _make_client()

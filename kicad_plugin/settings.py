@@ -96,6 +96,7 @@ class PluginSettings:
 
     # Context window management
     llm_context_tokens: int = 128_000  # total context window size in tokens
+    llm_context_auto: bool = True  # auto-detect the window from the provider when possible
     llm_compact_threshold: float = (
         0.70  # trigger compaction when estimated usage exceeds this fraction
     )

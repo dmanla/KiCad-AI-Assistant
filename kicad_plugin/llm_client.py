@@ -1013,7 +1013,7 @@ class LLMClient:
     def __init__(self, settings, mcp_base_url: str) -> None:
         self._settings = settings
         self._mcp_base_url = mcp_base_url
-        self._context_tokens: int = getattr(settings, "llm_context_tokens", 128_000)
+        self._context_tokens: int = int(getattr(settings, "llm_context_tokens", 128_000) or 128_000)
         self._compact_threshold: float = getattr(settings, "llm_compact_threshold", 0.70)
         self._compact_target_threshold: float = getattr(
             settings, "llm_compact_target_threshold", 0.49
@@ -1042,6 +1042,23 @@ class LLMClient:
     def set_history(self, history: list[dict[str, Any]]) -> None:
         """Replace conversation history when restoring a saved session."""
         self._history = list(history)
+
+    def set_context_tokens(self, tokens: int) -> None:
+        """Set the effective context window (e.g. after auto-detection).
+
+        Also drives the compaction budget and the Ollama ``num_ctx`` option,
+        so detection and the chat request stay consistent.
+        """
+        try:
+            value = int(tokens)
+        except (TypeError, ValueError):
+            return
+        if value > 0:
+            self._context_tokens = value
+
+    def get_context_tokens(self) -> int:
+        """Return the effective context window currently in use."""
+        return self._context_tokens
 
     def _run_tool_direct(
         self,
