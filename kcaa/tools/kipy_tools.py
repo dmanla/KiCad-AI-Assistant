@@ -86,7 +86,7 @@ def register_kipy_tools(mcp: FastMCP) -> None:
     # check_kicad_ipc_connection
     # ------------------------------------------------------------------
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Check KiCad IPC connection"})
     async def check_kicad_ipc_connection(ctx: Context | None = None) -> dict[str, Any]:
         """Check if the KiCad IPC socket is open and responsive.
 
@@ -153,7 +153,7 @@ def register_kipy_tools(mcp: FastMCP) -> None:
     # save_document
     # ------------------------------------------------------------------
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Save open PCB document"})
     async def save_document(file_path: str, ctx: Context | None = None) -> dict:
         """Save the currently open PCB document in KiCad.
 
@@ -234,7 +234,7 @@ def register_kipy_tools(mcp: FastMCP) -> None:
     # reload_kicad
     # ------------------------------------------------------------------
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Reload documents in KiCad"})
     async def reload_kicad(
         paths: list[str],
         ctx: Context | None = None,

@@ -109,7 +109,7 @@ def _run_fp_sync_in_background(force: bool, project_path: str | None) -> None:
 def register_pcb_library_tools(mcp: FastMCP) -> None:
     """Register footprint library tools with the MCP server."""
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Start footprint index sync"})
     async def sync_footprint_index(
         project_path: str | None = None,
         force: bool = False,
@@ -171,7 +171,7 @@ def register_pcb_library_tools(mcp: FastMCP) -> None:
             ),
         }
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Get footprint sync status"})
     async def get_footprint_sync_status(ctx: Context | None = None) -> dict[str, Any]:
         """Return the current status of the background footprint index sync.
 
@@ -200,7 +200,7 @@ def register_pcb_library_tools(mcp: FastMCP) -> None:
                 "error": _fp_sync_state.error,
             }
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "List footprint libraries"})
     async def list_footprint_libraries(
         project_path: str | None = None,
         ctx: Context | None = None,
@@ -270,7 +270,7 @@ def register_pcb_library_tools(mcp: FastMCP) -> None:
             "hint": "Run sync_footprint_index to build the index for faster search.",
         }
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Search footprint libraries"})
     async def search_footprints(
         query: str,
         project_path: str | None = None,
@@ -338,7 +338,7 @@ def register_pcb_library_tools(mcp: FastMCP) -> None:
             )
         return await _live_search_footprints(query, project_path, max_results)
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Get footprint details"})
     async def get_footprint_details(
         library_name: str,
         footprint_name: str,
@@ -407,7 +407,7 @@ def register_pcb_library_tools(mcp: FastMCP) -> None:
         info["file_path"] = mod_path
         return info
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Find footprints missing from libraries"})
     async def find_footprints_not_in_libraries(
         pcb_path: str,
         ctx: Context | None = None,
@@ -471,7 +471,7 @@ def register_pcb_library_tools(mcp: FastMCP) -> None:
             log.error("find_footprints_not_in_libraries failed: %s", exc, exc_info=True)
             return {"error": str(exc)}
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Create a footprint library"})
     async def create_footprint_library(
         name: str,
         project_dir: str | None = None,
@@ -567,7 +567,7 @@ def register_pcb_library_tools(mcp: FastMCP) -> None:
                     pass  # non-empty (indexed some footprints?) — leave for the user
             return {"error": str(exc)}
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Export footprints into a library"})
     async def add_footprints_to_library(
         pcb_path: str,
         footprints: list[str],

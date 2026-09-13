@@ -1637,7 +1637,7 @@ def _add_junction_and_split(sch: Any, px: float, py: float, tol: float = 0.01) -
 def register_wire_edit_tools(mcp: FastMCP) -> None:
     """Register all wire and junction editing tools with the MCP server."""
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Route a wire between points"})
     async def connect_points_with_wire(
         schematic_path: str,
         start_x: float,
@@ -1921,7 +1921,7 @@ def register_wire_edit_tools(mcp: FastMCP) -> None:
             "backup_path": schematic_path + ".bak",
         }
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Connect two pins with a wire"})
     async def connect_pins_with_wire(
         schematic_path: str,
         from_ref: str,
@@ -2052,7 +2052,7 @@ def register_wire_edit_tools(mcp: FastMCP) -> None:
             result["auto_junctions_added"] = auto_junctions
         return result
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Delete wire segments"})
     async def delete_wire_from_schematic(
         schematic_path: str,
         wires: list[dict],

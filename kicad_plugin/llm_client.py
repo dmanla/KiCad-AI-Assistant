@@ -1910,10 +1910,13 @@ class LLMClient:
             return ""
         lines = []
         for tname, tdef in registry.items():  # registration order
-            desc = (tdef["function"].get("description") or "").strip().splitlines()
-            first_line = desc[0] if desc else ""
-            # Keep the catalog compact: first sentence only, <= 100 chars.
-            summary = first_line.split(".", 1)[0] + "." if "." in first_line else first_line
+            # Registration-time summary wins; fall back to the first sentence
+            # of the description for tools that do not ship one.
+            summary = (tdef["function"].get("summary") or "").strip()
+            if not summary:
+                desc = (tdef["function"].get("description") or "").strip().splitlines()
+                first_line = desc[0] if desc else ""
+                summary = first_line.split(".", 1)[0] + "." if "." in first_line else first_line
             lines.append(f"- {tname}: {summary[:100]}")
         return "\n\n# Available tools\n" + "\n".join(lines)
 
@@ -2270,6 +2273,7 @@ class LLMClient:
                 "function": {
                     "name": t["name"],
                     "description": t.get("description", ""),
+                    "summary": (t.get("meta") or {}).get("summary", ""),
                     "parameters": t.get("inputSchema", {"type": "object", "properties": {}}),
                 },
             }

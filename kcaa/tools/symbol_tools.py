@@ -227,7 +227,7 @@ def _parse_lib_pins(lib_sym_raw: list) -> list[dict]:
 def register_symbol_tools(mcp: FastMCP) -> None:
     """Register symbol library tools with the MCP server."""
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Start symbol index sync"})
     async def sync_symbol_index(force: bool = False, ctx: Context | None = None) -> dict[str, Any]:
         """
         Start syncing the symbol index database with the current KiCad symbol libraries.
@@ -272,7 +272,7 @@ def register_symbol_tools(mcp: FastMCP) -> None:
             "Call get_symbol_sync_status to monitor progress.",
         }
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Get symbol sync status"})
     async def get_symbol_sync_status(ctx: Context | None = None) -> dict[str, Any]:
         """
         Return the current status of the background symbol index sync.
@@ -293,7 +293,7 @@ def register_symbol_tools(mcp: FastMCP) -> None:
             }
         return state
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Search indexed symbols"})
     async def search_symbols(
         query: str,
         limit: int = 50,
@@ -340,7 +340,7 @@ def register_symbol_tools(mcp: FastMCP) -> None:
             log.error(f"Symbol search failed: {e}", exc_info=True)
             return {"success": False, "error": str(e)}
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Look up a library symbol"})
     async def get_symbol(
         library_name: str,
         symbol_name: str,
@@ -392,7 +392,7 @@ def register_symbol_tools(mcp: FastMCP) -> None:
             log.error(f"get_symbol failed: {e}", exc_info=True)
             return {"success": False, "error": str(e)}
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "List symbol libraries"})
     async def list_symbol_libraries(
         table: str | None = None,
         limit: int = 200,
@@ -474,7 +474,7 @@ def register_symbol_tools(mcp: FastMCP) -> None:
             log.error(f"list_symbol_libraries failed: {e}", exc_info=True)
             return {"success": False, "error": str(e)}
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "List symbols in a library"})
     async def get_library_symbols(
         library_name: str,
         limit: int = 50,
@@ -531,7 +531,7 @@ def register_symbol_tools(mcp: FastMCP) -> None:
             log.error(f"get_library_symbols failed: {e}", exc_info=True)
             return {"success": False, "error": str(e)}
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Get symbol index statistics"})
     async def get_symbol_index_stats(ctx: Context | None = None) -> dict[str, Any]:
         """
         Return summary statistics about the symbol index database.
@@ -553,7 +553,7 @@ def register_symbol_tools(mcp: FastMCP) -> None:
             log.error(f"get_symbol_index_stats failed: {e}", exc_info=True)
             return {"success": False, "error": str(e)}
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Get symbol pin information"})
     async def get_symbol_pins(
         library_name: str,
         symbol_name: str,

@@ -2433,6 +2433,26 @@ class TestToolLoading:
         assert "thermal relief" not in block
         assert client._build_tool_catalog_block() == block  # deterministic per session
 
+    def test_catalog_prefers_registration_summary(self):
+        client = _make_client()
+        client._tool_registry = {
+            "get_board_info": {
+                "type": "function",
+                "function": {
+                    "name": "get_board_info",
+                    "description": (
+                        "Get general information about a KiCad PCB board. Includes "
+                        "layer counts, net count, and design settings."
+                    ),
+                    "summary": "Get general PCB board info",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        }
+        block = client._build_tool_catalog_block()
+        assert "- get_board_info: Get general PCB board info" in block
+        assert "layer counts" not in block
+
     def test_enable_tool_activates_batch_in_registration_order(self):
         client = _make_client()
         client._tool_registry = {

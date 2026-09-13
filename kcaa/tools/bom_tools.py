@@ -21,7 +21,7 @@ def register_bom_tools(mcp: FastMCP) -> None:
         mcp: The FastMCP server instance
     """
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Analyze a project's Bill of Materials"})
     async def analyze_bom(project_path: str, ctx: Context | None) -> dict[str, Any]:
         """Analyze a KiCad project's Bill of Materials.
 
@@ -162,7 +162,7 @@ def register_bom_tools(mcp: FastMCP) -> None:
 
         return results
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Export Bill of Materials CSV"})
     async def export_bom_csv(project_path: str, ctx: Context | None) -> dict[str, Any]:
         """Export a Bill of Materials for a KiCad project.
 

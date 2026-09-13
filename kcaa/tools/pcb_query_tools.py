@@ -111,7 +111,7 @@ def _net_sort_key(net: dict[str, Any]) -> tuple[int, Any, str]:
 def register_pcb_query_tools(mcp: FastMCP) -> None:
     """Register PCB board read/query tools with the MCP server."""
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Get general PCB board info"})
     async def get_board_info(pcb_path: str, ctx: Context | None) -> dict[str, Any]:
         """Get general information about a KiCad PCB board.
 
@@ -193,7 +193,7 @@ def register_pcb_query_tools(mcp: FastMCP) -> None:
             "generator_version": generator_version,
         }
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "List placed footprints"})
     async def list_footprints(
         pcb_path: str,
         ctx: Context | None,
@@ -248,7 +248,7 @@ def register_pcb_query_tools(mcp: FastMCP) -> None:
 
         return {"footprints": footprints, "count": len(footprints)}
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Get placed footprint details"})
     async def get_footprint(
         pcb_path: str,
         references: list[str],
@@ -381,7 +381,7 @@ def register_pcb_query_tools(mcp: FastMCP) -> None:
             "failure_count": failure_count,
         }
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Get footprint bounding boxes"})
     async def get_footprint_bbox(
         pcb_path: str,
         references: list[str],
@@ -454,7 +454,7 @@ def register_pcb_query_tools(mcp: FastMCP) -> None:
             "failure_count": failure_count,
         }
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Get board bounding box"})
     async def get_board_bounding_box(
         pcb_path: str,
         ctx: Context | None,
@@ -540,7 +540,7 @@ def register_pcb_query_tools(mcp: FastMCP) -> None:
             "footprints_without_courtyard": no_courtyard,
         }
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "List PCB nets"})
     async def list_nets(
         pcb_path: str,
         ctx: Context | None,
@@ -601,7 +601,7 @@ def register_pcb_query_tools(mcp: FastMCP) -> None:
 
         return {"nets": nets, "count": len(nets)}
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Get unconnected pad pairs"})
     async def get_ratsnest(
         pcb_path: str,
         ctx: Context | None,
@@ -823,7 +823,7 @@ def register_pcb_query_tools(mcp: FastMCP) -> None:
             "fully_routed": len(unconnected) == 0,
         }
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Score placement quality"})
     async def score_placement(
         pcb_path: str,
         ctx: Context | None = None,
@@ -991,7 +991,7 @@ def register_pcb_query_tools(mcp: FastMCP) -> None:
             "worst_contributors": worst_contributors,
         }
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Suggest placement order"})
     async def suggest_placement_order(
         pcb_path: str,
         ctx: Context | None = None,
@@ -1058,7 +1058,7 @@ def register_pcb_query_tools(mcp: FastMCP) -> None:
             "tier_counts": dict(tier_counts),
         }
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "List track segments"})
     async def list_tracks(
         pcb_path: str,
         ctx: Context | None = None,
@@ -1376,7 +1376,7 @@ def register_pcb_query_tools(mcp: FastMCP) -> None:
             "trace_count": len(result),
         }
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "List PCB vias"})
     async def list_vias(
         pcb_path: str,
         ctx: Context | None = None,

@@ -17,7 +17,7 @@ def register_analysis_tools(mcp: FastMCP) -> None:
         mcp: The FastMCP server instance
     """
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Validate a KiCad project structure"})
     def validate_project(project_path: str) -> dict[str, Any]:
         """Basic validation of a KiCad project."""
         if not os.path.exists(project_path):

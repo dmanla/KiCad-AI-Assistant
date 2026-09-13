@@ -1168,7 +1168,7 @@ def _add_lib_symbol(lib_symbols_wrapper: Any, lib_sym_raw: list, table_name: str
 def register_symbol_edit_tools(mcp: FastMCP) -> None:
     """Register all component editing tools with the MCP server."""
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Add a symbol to the schematic"})
     async def add_symbol_to_schematic(
         schematic_path: str,
         library_name: str,
@@ -1234,7 +1234,7 @@ def register_symbol_edit_tools(mcp: FastMCP) -> None:
             fields_autoplaced=fields_autoplaced,
         )
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Place a symbol relative to another"})
     async def place_symbol_relative(
         schematic_path: str,
         library_name: str,
@@ -1385,7 +1385,7 @@ def register_symbol_edit_tools(mcp: FastMCP) -> None:
             result["side"] = side
         return result
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Remove symbols from the schematic"})
     async def remove_symbol_from_schematic(
         schematic_path: str,
         references: list[str],
@@ -1496,7 +1496,7 @@ def register_symbol_edit_tools(mcp: FastMCP) -> None:
             log.exception("Unexpected error in remove_symbol_from_schematic")
             return {"error": str(exc), "success": False}
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Set component properties"})
     async def set_symbol_property(
         schematic_path: str,
         items: list[dict[str, Any]],
@@ -1674,7 +1674,7 @@ def register_symbol_edit_tools(mcp: FastMCP) -> None:
             log.exception("Unexpected error in set_symbol_property")
             return {"error": str(exc), "success": False}
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Rename a reference designator"})
     async def rename_symbol(
         schematic_path: str,
         symbol_uuid: str,
@@ -1809,7 +1809,7 @@ def register_symbol_edit_tools(mcp: FastMCP) -> None:
             log.exception("Unexpected error in rename_symbol")
             return {"error": str(exc), "success": False}
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "List component properties"})
     async def list_symbol_properties(
         schematic_path: str,
         references: list[str],
@@ -1902,7 +1902,7 @@ def register_symbol_edit_tools(mcp: FastMCP) -> None:
             "failure_count": failure_count,
         }
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Delete a component property"})
     async def delete_symbol_property(
         schematic_path: str,
         reference: str,
@@ -1993,7 +1993,7 @@ def register_symbol_edit_tools(mcp: FastMCP) -> None:
             log.exception("Unexpected error in delete_symbol_property")
             return {"error": str(exc), "success": False}
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Move or rotate a component"})
     async def move_component(
         schematic_path: str,
         reference: str,
@@ -2398,7 +2398,7 @@ def register_symbol_edit_tools(mcp: FastMCP) -> None:
             log.exception("Unexpected error in move_component")
             return {"error": str(exc), "success": False}
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Add a schematic net label"})
     async def add_label_to_schematic(
         schematic_path: str,
         text: str,
@@ -2506,7 +2506,7 @@ def register_symbol_edit_tools(mcp: FastMCP) -> None:
             "backup_path": schematic_path + ".bak",
         }
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "List schematic net labels"})
     async def list_labels_in_schematic(
         schematic_path: str,
         label_type: str | None = None,
@@ -2569,7 +2569,7 @@ def register_symbol_edit_tools(mcp: FastMCP) -> None:
 
         return {"success": True, "labels": labels, "count": len(labels)}
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Find duplicate reference designators"})
     async def check_reference_conflicts(
         schematic_path: str,
         ctx: Context | None = None,
@@ -2634,7 +2634,7 @@ def register_symbol_edit_tools(mcp: FastMCP) -> None:
             "conflicts": conflicts,
         }
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Delete schematic net labels"})
     async def delete_label_from_schematic(
         schematic_path: str,
         x: float = 0.0,

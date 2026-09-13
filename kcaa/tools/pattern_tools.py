@@ -27,7 +27,7 @@ def register_pattern_tools(mcp: FastMCP) -> None:
         mcp: The FastMCP server instance
     """
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Identify circuit patterns"})
     async def identify_circuit_patterns(schematic_path: str, ctx: Context | None) -> dict[str, Any]:
         """Identify common circuit patterns in a KiCad schematic.
 
@@ -156,7 +156,7 @@ def register_pattern_tools(mcp: FastMCP) -> None:
                 ctx.info(f"Error identifying circuit patterns: {str(e)}")
             return {"success": False, "error": str(e)}
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Analyze project circuit patterns"})
     async def analyze_project_circuit_patterns(
         project_path: str, ctx: Context | None
     ) -> dict[str, Any]:

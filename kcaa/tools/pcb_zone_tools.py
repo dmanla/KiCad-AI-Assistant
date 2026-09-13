@@ -253,7 +253,7 @@ def _build_zone_node(
 def register_pcb_zone_tools(mcp: FastMCP) -> None:
     """Register PCB zone tools with the MCP server."""
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "List PCB zones"})
     async def list_zones(
         pcb_path: str,
         ctx: Context | None,
@@ -291,7 +291,7 @@ def register_pcb_zone_tools(mcp: FastMCP) -> None:
             "keepout_count": keepout,
         }
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Add a copper or keepout zone"})
     async def add_zone(
         pcb_path: str,
         layer: str,
@@ -393,7 +393,7 @@ def register_pcb_zone_tools(mcp: FastMCP) -> None:
             "pcb_path": pcb_path,
         }
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Delete a zone"})
     async def delete_zone(
         pcb_path: str,
         zone_uuid: str,
@@ -451,7 +451,7 @@ def register_pcb_zone_tools(mcp: FastMCP) -> None:
             "pcb_path": pcb_path,
         }
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Refill all copper zones"})
     async def refill_zones(ctx: Context | None = None) -> dict:
         """Refill all zones (copper pours) on the currently open PCB.
 

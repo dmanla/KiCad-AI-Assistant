@@ -422,7 +422,7 @@ def _compute_proximity_score(members: list[dict[str, Any]]) -> dict[str, float]:
 def register_schematic_group_tools(mcp: FastMCP) -> None:
     """Register schematic symbol group management tools."""
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Assign symbols to a group"})
     async def assign_symbols_to_group(
         schematic_path: str,
         references: list[str],
@@ -489,7 +489,7 @@ def register_schematic_group_tools(mcp: FastMCP) -> None:
             "schematic_path": schematic_path,
         }
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "List symbol groups"})
     async def list_symbol_groups(
         schematic_path: str,
         ctx: Context | None = None,
@@ -565,7 +565,7 @@ def register_schematic_group_tools(mcp: FastMCP) -> None:
             "ungrouped_count": ungrouped,
         }
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Get symbol group details"})
     async def get_symbol_group(
         schematic_path: str,
         group_name: str,
@@ -613,7 +613,7 @@ def register_schematic_group_tools(mcp: FastMCP) -> None:
             },
         }
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Score symbol group placement"})
     async def score_symbol_group(
         schematic_path: str,
         group_name: str,
@@ -658,7 +658,7 @@ def register_schematic_group_tools(mcp: FastMCP) -> None:
             "anchor_ref": anchor["reference"] if anchor else None,
         }
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Place a symbol group"})
     async def place_symbol_group(
         schematic_path: str,
         group_name: str,
@@ -822,7 +822,7 @@ def register_schematic_group_tools(mcp: FastMCP) -> None:
             "schematic_path": schematic_path,
         }
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Move a symbol group"})
     async def move_symbol_group(
         schematic_path: str,
         group_name: str,
@@ -946,7 +946,7 @@ def register_schematic_group_tools(mcp: FastMCP) -> None:
             result["note"] = "Position adjusted to nearest free area to avoid overlap."
         return result
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Rotate a symbol group"})
     async def rotate_symbol_group(
         schematic_path: str,
         group_name: str,

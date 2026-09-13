@@ -1173,7 +1173,7 @@ def _find_group_board_position(
 def register_pcb_placement_helper_tools(mcp: FastMCP) -> None:
     """Register PCB placement spatial query tools with the MCP server."""
 
-    @mcp.tool()
+    @mcp.tool(meta={"summary": "Find free PCB placement area"})
     async def find_free_pcb_area(
         pcb_path: str,
         footprint_ref: str | None = None,
